@@ -1,0 +1,24 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  // Window controls
+  minimizeWindow: () => ipcRenderer.send('window-minimize'),
+  maximizeWindow: () => ipcRenderer.send('window-maximize'),
+  closeWindow: () => ipcRenderer.send('window-close'),
+
+  // Session management
+  startHosting: () => ipcRenderer.invoke('server:start-hosting'),
+  joinSession: (sessionId) => ipcRenderer.invoke('server:join-session', sessionId),
+  disconnectSession: () => ipcRenderer.send('server:disconnect'),
+
+  // Screen capture
+  getScreenSources: () => ipcRenderer.invoke('screen:get-sources'),
+
+  // WebRTC signaling
+  sendWebRTCSignal: (type, payload) => ipcRenderer.send('webrtc:send-signal', { type, payload }),
+
+  // Session events from server
+  onSessionEvent: (callback) => {
+    ipcRenderer.on('server:session-event', (_event, data) => callback(data));
+  },
+});

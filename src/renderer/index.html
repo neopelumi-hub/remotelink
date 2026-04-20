@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:;">
+  <title>RemoteLink</title>
+  <link rel="stylesheet" href="styles/main.css">
+</head>
+<body>
+  <!-- Custom Title Bar -->
+  <div class="titlebar">
+    <div class="titlebar-drag">
+      <div class="titlebar-logo">
+        <svg class="titlebar-icon" viewBox="0 0 24 24" width="18" height="18">
+          <path fill="#3b82f6" d="M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-6l-2 3-2-3H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 3v2h14V7H5zm0 4v2h10v-2H5z"/>
+        </svg>
+        <span class="titlebar-title">RemoteLink</span>
+      </div>
+    </div>
+    <div class="titlebar-controls">
+      <button class="titlebar-btn" id="btn-minimize" aria-label="Minimize">
+        <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" fill="currentColor"/></svg>
+      </button>
+      <button class="titlebar-btn" id="btn-maximize" aria-label="Maximize">
+        <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button class="titlebar-btn titlebar-btn-close" id="btn-close" aria-label="Close">
+        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- App Layout -->
+  <div class="app-container">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-nav">
+        <button class="sidebar-btn active" data-page="home" title="Home">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 13h1v7c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2v-7h1a1 1 0 0 0 .7-1.7l-9-9a1 1 0 0 0-1.4 0l-9 9A1 1 0 0 0 3 13zm9-8.6 6 6V20h-4v-5a1 1 0 0 0-1-1h-2a1 1 0 0 0-1 1v5H6v-9.6l6-6z"/></svg>
+          <span class="sidebar-label">Home</span>
+        </button>
+        <button class="sidebar-btn" data-page="transfer" title="File Transfer">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM8 17l3-3-3-3 1.4-1.4L13.8 14l-4.4 4.4L8 17z"/></svg>
+          <span class="sidebar-label">File Transfer</span>
+        </button>
+        <button class="sidebar-btn" data-page="chat" title="Chat">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+          <span class="sidebar-label">Chat</span>
+        </button>
+        <button class="sidebar-btn" data-page="security" title="Security Mode">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 2.18 7 3.12v4.7c0 4.67-3.13 9.04-7 10.2-3.87-1.16-7-5.53-7-10.2V6.3l7-3.12zM11 7v6h2V7h-2zm0 8v2h2v-2h-2z"/></svg>
+          <span class="sidebar-label">Security</span>
+        </button>
+        <button class="sidebar-btn" data-page="settings" title="Settings">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94c0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.04 7.04 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.48.48 0 0 0 .12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.26.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+          <span class="sidebar-label">Settings</span>
+        </button>
+      </div>
+      <div class="sidebar-footer">
+        <div class="connection-status">
+          <span class="status-dot offline"></span>
+          <span class="sidebar-label">Offline</span>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="content">
+      <!-- Home Page -->
+      <div class="page active" id="page-home">
+        <div class="home-container">
+          <div class="home-header">
+            <h1 class="home-title">RemoteLink</h1>
+            <p class="home-subtitle">Secure Remote Desktop Connection</p>
+          </div>
+
+          <div class="session-cards">
+            <!-- Host Card -->
+            <div class="session-card">
+              <div class="card-icon host-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48"><path fill="#3b82f6" d="M4 2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6l2 3v1H8v-1l2-3H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 2v10h16V4H4z"/></svg>
+              </div>
+              <h2 class="card-title">Host Session</h2>
+              <p class="card-desc">Allow someone to connect to and control this computer remotely.</p>
+              <div class="card-id-section">
+                <label class="card-label">Your Session ID</label>
+                <div class="card-id">
+                  <span class="id-value">— — —</span>
+                </div>
+              </div>
+              <button class="btn btn-primary btn-host">Start Hosting</button>
+            </div>
+
+            <!-- Join Card -->
+            <div class="session-card">
+              <div class="card-icon join-icon">
+                <svg viewBox="0 0 24 24" width="48" height="48"><path fill="#10b981" d="M15 9h-5v2h5a3 3 0 0 1 0 6h-5v2h5a5 5 0 0 0 0-10zm-6 4h8v-2H9v2zM4 13a5 5 0 0 0 5 5h1v-2H9a3 3 0 0 1 0-6h1V8H9a5 5 0 0 0-5 5z"/></svg>
+              </div>
+              <h2 class="card-title">Join Session</h2>
+              <p class="card-desc">Connect to another computer using their Session ID.</p>
+              <div class="card-id-section">
+                <label class="card-label">Enter Session ID</label>
+                <input type="text" class="card-input" placeholder="Enter ID to connect" spellcheck="false" maxlength="6">
+                <p class="card-error" id="join-error"></p>
+              </div>
+              <button class="btn btn-success btn-join">Connect</button>
+            </div>
+          </div>
+
+          <!-- Host Monitor Selector (hidden by default) -->
+          <div class="host-monitors" id="host-monitors" style="display: none;">
+            <h3 class="monitors-title">Your Monitors</h3>
+            <div class="monitors-grid" id="monitors-grid"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Viewer Page (client sees remote screen here) -->
+      <div class="page" id="page-viewer">
+        <div class="viewer-container">
+          <div class="viewer-toolbar">
+            <div class="monitor-tabs" id="monitor-tabs"></div>
+            <span class="viewer-status" id="viewer-status">Connecting...</span>
+          </div>
+          <div class="viewer-viewport">
+            <video id="remote-video" autoplay playsinline></video>
+            <div class="viewer-loading" id="viewer-loading">
+              <div class="loading-spinner"></div>
+              <span>Waiting for host screen...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- File Transfer Page -->
+      <div class="page" id="page-transfer">
+        <div class="page-placeholder">
+          <svg viewBox="0 0 24 24" width="64" height="64"><path fill="#3b82f6" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM8 17l3-3-3-3 1.4-1.4L13.8 14l-4.4 4.4L8 17z"/></svg>
+          <h2>File Transfer</h2>
+          <p>Transfer files between connected machines. Connect to a session first.</p>
+        </div>
+      </div>
+
+      <!-- Chat Page -->
+      <div class="page" id="page-chat">
+        <div class="page-placeholder">
+          <svg viewBox="0 0 24 24" width="64" height="64"><path fill="#3b82f6" d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+          <h2>Chat</h2>
+          <p>Send messages during a remote session. Connect to a session first.</p>
+        </div>
+      </div>
+
+      <!-- Security Mode Page -->
+      <div class="page" id="page-security">
+        <div class="page-placeholder">
+          <svg viewBox="0 0 24 24" width="64" height="64"><path fill="#3b82f6" d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 2.18 7 3.12v4.7c0 4.67-3.13 9.04-7 10.2-3.87-1.16-7-5.53-7-10.2V6.3l7-3.12z"/></svg>
+          <h2>Security Mode</h2>
+          <p>Silent monitoring and security surveillance tools.</p>
+        </div>
+      </div>
+
+      <!-- Settings Page -->
+      <div class="page" id="page-settings">
+        <div class="page-placeholder">
+          <svg viewBox="0 0 24 24" width="64" height="64"><path fill="#3b82f6" d="M19.14 12.94a7.07 7.07 0 0 0 .06-.94c0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96a7.04 7.04 0 0 0-1.62-.94l-.36-2.54a.48.48 0 0 0-.48-.41h-3.84a.48.48 0 0 0-.48.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 0 0-.59.22L2.74 8.87a.48.48 0 0 0 .12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.26.41.48.41h3.84c.24 0 .44-.17.48-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+          <h2>Settings</h2>
+          <p>Configure connection, display, and security preferences.</p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container"></div>
+
+  <script src="scripts/webrtc.js"></script>
+  <script src="scripts/renderer.js"></script>
+</body>
+</html>
