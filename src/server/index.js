@@ -229,6 +229,15 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- Chat relay (bidirectional) ---
+  const chatEvents = ['chat:message', 'chat:delivered', 'chat:read', 'chat:typing'];
+  chatEvents.forEach(ev => {
+    socket.on(ev, (data) => {
+      const sessionId = socketToSession.get(socket.id);
+      if (sessionId) socket.to(sessionId).emit(ev, data);
+    });
+  });
+
   // --- File transfer relay (bidirectional) ---
   const transferEvents = [
     'transfer:request', 'transfer:accepted', 'transfer:denied',

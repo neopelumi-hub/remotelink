@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { io: ioClient } = require('socket.io-client');
 const machineConfig = require('../utils/machine-id');
 const { FileTransferManager } = require('../transfer/file-transfer');
+const { ChatManager } = require('../chat/index');
 
 const SERVER_URL = 'http://localhost:3000';
 
@@ -16,6 +17,7 @@ let config;
 
 const transferManager = new FileTransferManager();
 const progressThrottles = new Map(); // transferId -> last send time
+const chatManager = new ChatManager();
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -249,6 +251,42 @@ function connectSocket() {
       type: 'transfer-error',
       transferId: data.transferId,
       message: data.message,
+    });
+  });
+
+  // --- Chat socket listeners ---
+  socket.on('chat:message', (data) => {
+    const msg = chatManager.addIncoming(data);
+    // Send delivery receipt back
+    if (socket.connected) {
+      socket.emit('chat:delivered', { messageId: data.id });
+    }
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'chat-message',
+      ...msg,
+    });
+  });
+
+  socket.on('chat:delivered', (data) => {
+    chatManager.markDelivered(data.messageId);
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'chat-delivered',
+      messageId: data.messageId,
+    });
+  });
+
+  socket.on('chat:read', (data) => {
+    chatManager.markRead(data.messageId);
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'chat-read',
+      messageId: data.messageId,
+    });
+  });
+
+  socket.on('chat:typing', (data) => {
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'chat-typing',
+      typing: data.typing,
     });
   });
 
@@ -529,6 +567,36 @@ ipcMain.on('transfer:cancel', (_event, data) => {
 
 ipcMain.on('transfer:open-downloads', () => {
   shell.openPath(transferManager.getDownloadsPath());
+});
+
+// --- Chat IPC handlers ---
+ipcMain.on('chat:send-message', (_event, data) => {
+  const msg = chatManager.addOutgoing(data.id, data.text, data.senderName);
+  if (socket && socket.connected) {
+    socket.emit('chat:message', {
+      id: data.id,
+      text: data.text,
+      senderName: data.senderName,
+      timestamp: msg.timestamp,
+    });
+  }
+});
+
+ipcMain.on('chat:send-typing', (_event, data) => {
+  if (socket && socket.connected) {
+    socket.emit('chat:typing', { typing: data.typing });
+  }
+});
+
+ipcMain.on('chat:send-read', (_event, data) => {
+  chatManager.markAllIncomingRead();
+  if (socket && socket.connected) {
+    socket.emit('chat:read', { messageId: data.messageId });
+  }
+});
+
+ipcMain.on('chat:clear', () => {
+  chatManager.clear();
 });
 
 // Disconnect from server

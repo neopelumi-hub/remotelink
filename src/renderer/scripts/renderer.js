@@ -14,6 +14,15 @@ const activeTransfers = new Map();
 let pendingTransferRequest = null;
 const transferRafPending = new Set();
 
+// --- Chat state ---
+const chatMessages = [];
+let chatConnectedPeer = null; // { name, id }
+let chatUnreadCount = 0;
+let remoteIsTyping = false;
+let typingTimeout = null;
+let lastTypingSent = 0;
+let chatAudioCtx = null;
+
 // --- Remote control state ---
 let controlActive = false;
 let lastMouseMoveTime = 0;
@@ -62,6 +71,14 @@ sidebarButtons.forEach(btn => {
     // Load settings data when navigating to settings page
     if (targetPage === 'settings') {
       renderSettingsPage();
+    }
+
+    // Mark chat messages as read when switching to chat page
+    if (targetPage === 'chat') {
+      // Render any unread messages that arrived while on other pages
+      const unrendered = chatMessages.filter(m => !document.getElementById(`chat-msg-${m.id}`));
+      unrendered.forEach(m => renderChatMessage(m));
+      markChatAsRead();
     }
   });
 });
@@ -157,6 +174,7 @@ hostBtn.addEventListener('click', async () => {
       webrtcManager = null;
     }
     hideMonitorPanel();
+    clearChatUI();
     window.electronAPI.disconnectSession();
     isHosting = false;
     idValueEl.textContent = '— — —';
@@ -226,6 +244,7 @@ joinBtn.addEventListener('click', async () => {
     joinBtn.classList.add('btn-joined');
     setStatus(true);
     setTransferButtonsEnabled(true);
+    setChatPeer('Host', null);
     showToast('Connected to session ' + result.sessionId, 'success');
   } else {
     // --- Machine ID mode (access control flow) ---
@@ -755,6 +774,7 @@ window.electronAPI.onSessionEvent((event) => {
       console.log('[Renderer] Client joined, isHosting:', isHosting);
       showToast('A client has connected to your session', 'success');
       setTransferButtonsEnabled(true);
+      setChatPeer(event.clientMachineName || 'Client', event.clientMachineId);
       if (isHosting) {
         initHostWebRTC();
       }
@@ -821,6 +841,7 @@ window.electronAPI.onSessionEvent((event) => {
       joinBtn.classList.add('btn-joined');
       setStatus(true);
       setTransferButtonsEnabled(true);
+      setChatPeer('Host', null);
       showToast('Access granted — connected!', 'success');
       break;
 
@@ -836,6 +857,61 @@ window.electronAPI.onSessionEvent((event) => {
         hideAccessModal();
         showToast('Access request timed out', 'info');
       }
+      break;
+
+    // --- Chat events ---
+    case 'chat-message': {
+      const msg = {
+        id: event.id,
+        sender: 'remote',
+        senderName: event.senderName,
+        text: event.text,
+        timestamp: event.timestamp,
+        delivered: true,
+        read: false,
+      };
+      chatMessages.push(msg);
+
+      if (!chatConnectedPeer && event.senderName) {
+        setChatPeer(event.senderName, null);
+      }
+
+      if (isChatPageActive()) {
+        renderChatMessage(msg);
+        msg.read = true;
+        window.electronAPI.sendChatRead({ messageId: msg.id });
+      } else {
+        chatUnreadCount++;
+        updateChatBadge();
+        showToast(`${event.senderName}: ${event.text.slice(0, 60)}${event.text.length > 60 ? '...' : ''}`, 'info');
+      }
+      playNotificationSound();
+      break;
+    }
+
+    case 'chat-delivered': {
+      const msg = chatMessages.find(m => m.id === event.messageId);
+      if (msg) {
+        msg.delivered = true;
+        updateMessageReceipt(event.messageId, 'delivered');
+      }
+      break;
+    }
+
+    case 'chat-read': {
+      for (const msg of chatMessages) {
+        if (msg.sender === 'local' && !msg.read) {
+          msg.read = true;
+          updateMessageReceipt(msg.id, 'read');
+        }
+        if (msg.id === event.messageId) break;
+      }
+      break;
+    }
+
+    case 'chat-typing':
+      remoteIsTyping = !!event.typing;
+      document.getElementById('chat-typing').style.display = remoteIsTyping ? '' : 'none';
       break;
 
     // --- File transfer events ---
@@ -913,6 +989,7 @@ window.electronAPI.onSessionEvent((event) => {
     case 'host-disconnected':
       cleanupWebRTC();
       hideViewer();
+      clearChatUI();
       isJoined = false;
       joinBtn.textContent = 'Connect';
       joinBtn.disabled = false;
@@ -926,6 +1003,7 @@ window.electronAPI.onSessionEvent((event) => {
     case 'client-disconnected':
       cleanupWebRTC();
       hideMonitorPanel();
+      clearChatUI();
       setTransferButtonsEnabled(false);
       showToast('Client has disconnected', 'info');
       break;
@@ -933,6 +1011,7 @@ window.electronAPI.onSessionEvent((event) => {
     case 'disconnected':
       cleanupWebRTC();
       hideAccessModal();
+      clearChatUI();
       setTransferButtonsEnabled(false);
       if (isHosting) {
         hideMonitorPanel();
@@ -1202,6 +1281,245 @@ document.getElementById('btn-open-downloads').addEventListener('click', () => {
 function setTransferButtonsEnabled(enabled) {
   document.getElementById('btn-send-files').disabled = !enabled;
   document.getElementById('btn-send-folder').disabled = !enabled;
+}
+
+// =============================================
+// Chat UI
+// =============================================
+
+const EMOJI_LIST = [
+  '😀','😂','😊','😍','🥰','😎','🤔','😅','😢','😭',
+  '😤','🤣','😏','🙄','😴','🤗','😇','🤩','😋','😜',
+  '👍','👎','👋','🙌','👏','🤝','💪','🎉','🔥','❤️',
+  '💯','✅','❌','⭐','💡','📎','🖥️','📁','🔒','🔓',
+];
+
+function playNotificationSound() {
+  try {
+    if (!chatAudioCtx) chatAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = chatAudioCtx.createOscillator();
+    const gain = chatAudioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(chatAudioCtx.destination);
+    osc.frequency.value = 800;
+    osc.type = 'sine';
+    gain.gain.value = 0.08;
+    gain.gain.exponentialRampToValueAtTime(0.001, chatAudioCtx.currentTime + 0.15);
+    osc.start();
+    osc.stop(chatAudioCtx.currentTime + 0.15);
+  } catch (e) { /* ignore audio errors */ }
+}
+
+function formatChatTime(timestamp) {
+  const d = new Date(timestamp);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function isChatPageActive() {
+  const chatPage = document.getElementById('page-chat');
+  return chatPage && chatPage.classList.contains('active');
+}
+
+function updateChatBadge() {
+  const badge = document.getElementById('chat-badge');
+  if (chatUnreadCount > 0) {
+    badge.textContent = chatUnreadCount > 99 ? '99+' : chatUnreadCount;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function scrollChatToBottom() {
+  const container = document.getElementById('chat-messages');
+  requestAnimationFrame(() => {
+    container.scrollTop = container.scrollHeight;
+  });
+}
+
+function renderChatMessage(msg) {
+  const container = document.getElementById('chat-messages');
+  const emptyEl = document.getElementById('chat-empty');
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  const bubble = document.createElement('div');
+  bubble.className = `chat-bubble ${msg.sender === 'local' ? 'chat-bubble-local' : 'chat-bubble-remote'}`;
+  bubble.id = `chat-msg-${msg.id}`;
+
+  const textEl = document.createElement('div');
+  textEl.className = 'chat-bubble-text';
+  textEl.textContent = msg.text;
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'chat-bubble-meta';
+
+  let metaContent = formatChatTime(msg.timestamp);
+  if (msg.sender === 'local') {
+    let receipt = '';
+    if (msg.read) {
+      receipt = '<span class="chat-receipt read" title="Read">&#10003;&#10003;</span>';
+    } else if (msg.delivered) {
+      receipt = '<span class="chat-receipt delivered" title="Delivered">&#10003;&#10003;</span>';
+    } else {
+      receipt = '<span class="chat-receipt" title="Sent">&#10003;</span>';
+    }
+    metaContent += ' ' + receipt;
+  }
+  metaEl.innerHTML = metaContent;
+
+  bubble.appendChild(textEl);
+  bubble.appendChild(metaEl);
+  container.appendChild(bubble);
+  scrollChatToBottom();
+}
+
+function updateMessageReceipt(messageId, status) {
+  const el = document.getElementById(`chat-msg-${messageId}`);
+  if (!el) return;
+  const meta = el.querySelector('.chat-bubble-meta');
+  if (!meta) return;
+
+  const receiptEl = meta.querySelector('.chat-receipt');
+  if (!receiptEl) return;
+
+  if (status === 'read') {
+    receiptEl.className = 'chat-receipt read';
+    receiptEl.title = 'Read';
+    receiptEl.innerHTML = '&#10003;&#10003;';
+  } else if (status === 'delivered') {
+    receiptEl.className = 'chat-receipt delivered';
+    receiptEl.title = 'Delivered';
+    receiptEl.innerHTML = '&#10003;&#10003;';
+  }
+}
+
+function clearChatUI() {
+  chatMessages.length = 0;
+  chatConnectedPeer = null;
+  chatUnreadCount = 0;
+  remoteIsTyping = false;
+  updateChatBadge();
+  document.getElementById('chat-header-title').textContent = 'No active session';
+  document.getElementById('chat-typing').style.display = 'none';
+  const container = document.getElementById('chat-messages');
+  container.innerHTML = `
+    <div class="chat-empty" id="chat-empty">
+      <svg viewBox="0 0 24 24" width="48" height="48"><path fill="var(--text-muted)" d="M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+      <p>No messages yet. Start the conversation!</p>
+    </div>
+  `;
+  setChatEnabled(false);
+  window.electronAPI.clearChat();
+}
+
+function setChatEnabled(enabled) {
+  document.getElementById('chat-input').disabled = !enabled;
+  document.getElementById('chat-send-btn').disabled = !enabled;
+}
+
+function setChatPeer(name, id) {
+  chatConnectedPeer = { name, id };
+  document.getElementById('chat-header-title').textContent = `Connected to ${name || id || 'peer'}`;
+  setChatEnabled(true);
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text || !(isHosting || isJoined)) return;
+
+  const info = await window.electronAPI.getMachineInfo();
+  const id = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+
+  const msg = {
+    id,
+    sender: 'local',
+    senderName: info.machineName,
+    text,
+    timestamp: Date.now(),
+    delivered: false,
+    read: false,
+  };
+
+  chatMessages.push(msg);
+  renderChatMessage(msg);
+
+  window.electronAPI.sendChatMessage({
+    id,
+    text,
+    senderName: info.machineName,
+  });
+
+  input.value = '';
+  // Send stop-typing
+  window.electronAPI.sendTypingIndicator({ typing: false });
+}
+
+// Chat input handlers
+document.getElementById('chat-send-btn').addEventListener('click', sendChatMessage);
+
+document.getElementById('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChatMessage();
+  }
+});
+
+document.getElementById('chat-input').addEventListener('input', () => {
+  if (!(isHosting || isJoined)) return;
+  const now = Date.now();
+  if (now - lastTypingSent > 2000) {
+    lastTypingSent = now;
+    window.electronAPI.sendTypingIndicator({ typing: true });
+  }
+  clearTimeout(typingTimeout);
+  typingTimeout = setTimeout(() => {
+    window.electronAPI.sendTypingIndicator({ typing: false });
+  }, 3000);
+});
+
+// Emoji picker
+function buildEmojiPicker() {
+  const picker = document.getElementById('chat-emoji-picker');
+  picker.innerHTML = '';
+  EMOJI_LIST.forEach(emoji => {
+    const btn = document.createElement('button');
+    btn.className = 'emoji-btn';
+    btn.textContent = emoji;
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('chat-input');
+      input.value += emoji;
+      input.focus();
+    });
+    picker.appendChild(btn);
+  });
+}
+
+document.getElementById('chat-emoji-btn').addEventListener('click', () => {
+  const picker = document.getElementById('chat-emoji-picker');
+  const isVisible = picker.style.display !== 'none';
+  picker.style.display = isVisible ? 'none' : '';
+  if (!isVisible && picker.children.length === 0) {
+    buildEmojiPicker();
+  }
+});
+
+// Close emoji picker when clicking outside
+document.getElementById('chat-messages').addEventListener('click', () => {
+  document.getElementById('chat-emoji-picker').style.display = 'none';
+});
+
+// Mark messages as read when chat page is active
+function markChatAsRead() {
+  if (!isChatPageActive()) return;
+  const unread = chatMessages.filter(m => m.sender === 'remote' && !m.read);
+  if (unread.length === 0) return;
+
+  const lastMsg = unread[unread.length - 1];
+  unread.forEach(m => m.read = true);
+  chatUnreadCount = 0;
+  updateChatBadge();
+  window.electronAPI.sendChatRead({ messageId: lastMsg.id });
 }
 
 // =============================================

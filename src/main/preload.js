@@ -29,6 +29,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendInputCommand: (data) => ipcRenderer.send('input:send-command', data),
   setActiveDisplay: (bounds) => ipcRenderer.send('input:set-active-display', bounds),
 
+  // Chat
+  sendChatMessage: (data) => ipcRenderer.send('chat:send-message', data),
+  sendTypingIndicator: (data) => ipcRenderer.send('chat:send-typing', data),
+  sendChatRead: (data) => ipcRenderer.send('chat:send-read', data),
+  clearChat: () => ipcRenderer.send('chat:clear'),
+
   // File transfer
   selectFiles: () => ipcRenderer.invoke('transfer:select-files'),
   selectFolder: () => ipcRenderer.invoke('transfer:select-folder'),
