@@ -121,7 +121,11 @@
         <div class="viewer-container">
           <div class="viewer-toolbar">
             <div class="monitor-tabs" id="monitor-tabs"></div>
-            <span class="viewer-status" id="viewer-status">Connecting...</span>
+            <div class="viewer-toolbar-right">
+              <span class="control-indicator" id="control-indicator">CONTROLLING</span>
+              <button class="btn-control" id="control-btn">Take Control</button>
+              <span class="viewer-status" id="viewer-status">Connecting...</span>
+            </div>
           </div>
           <div class="viewer-viewport">
             <video id="remote-video" autoplay playsinline></video>

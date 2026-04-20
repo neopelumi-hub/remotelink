@@ -101,6 +101,15 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- Remote input relay (client → host only) ---
+  socket.on('input:command', (data) => {
+    const sessionId = socketToSession.get(socket.id);
+    const session = sessionId && sessions.get(sessionId);
+    if (session && session.hostSocketId) {
+      io.to(session.hostSocketId).emit('input:command', data);
+    }
+  });
+
   // --- Monitor switch relay (client → host only) ---
   socket.on('monitor:switch-request', (data) => {
     const sessionId = socketToSession.get(socket.id);

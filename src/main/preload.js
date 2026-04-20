@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // WebRTC signaling
   sendWebRTCSignal: (type, payload) => ipcRenderer.send('webrtc:send-signal', { type, payload }),
 
+  // Remote input control
+  sendInputCommand: (data) => ipcRenderer.send('input:send-command', data),
+  setActiveDisplay: (bounds) => ipcRenderer.send('input:set-active-display', bounds),
+
   // Session events from server
   onSessionEvent: (callback) => {
     ipcRenderer.on('server:session-event', (_event, data) => callback(data));

@@ -9,6 +9,11 @@ let webrtcManager = null;
 let screenSources = [];
 let currentMonitorIndex = 0;
 
+// --- Remote control state ---
+let controlActive = false;
+let lastMouseMoveTime = 0;
+const MOUSE_THROTTLE_MS = 16; // ~60fps cap
+
 // --- DOM Elements ---
 const statusDot = document.querySelector('.status-dot');
 const statusLabel = document.querySelector('.sidebar-footer .sidebar-label');
@@ -211,6 +216,11 @@ async function handleMonitorSelect(index) {
   try {
     await webrtcManager.switchMonitor(screenSources[index].id);
 
+    // Update host display bounds for input mapping
+    if (screenSources[index].bounds) {
+      window.electronAPI.setActiveDisplay(screenSources[index].bounds);
+    }
+
     // Update active card
     document.querySelectorAll('.monitor-card').forEach((card, i) => {
       card.classList.toggle('active', i === index);
@@ -233,6 +243,7 @@ function showViewer() {
 }
 
 function hideViewer() {
+  disableControl();
   const video = document.getElementById('remote-video');
   video.srcObject = null;
   document.getElementById('viewer-loading').style.display = '';
@@ -269,6 +280,195 @@ function renderMonitorTabs(sources) {
 }
 
 // =============================================
+// Remote Control — Input Capture
+// =============================================
+
+function enableControl() {
+  controlActive = true;
+  const video = document.getElementById('remote-video');
+  const viewport = document.querySelector('.viewer-viewport');
+  viewport.classList.add('control-active');
+  document.getElementById('control-btn').textContent = 'Release Control';
+  document.getElementById('control-btn').classList.add('active');
+  document.getElementById('control-indicator').classList.add('visible');
+  video.style.cursor = 'none';
+  showToast('Remote control active — press Esc to release', 'info');
+}
+
+function disableControl() {
+  if (!controlActive) return;
+  controlActive = false;
+
+  // Release any potentially stuck modifier keys on the host
+  ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
+   'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].forEach(code => {
+    window.electronAPI.sendInputCommand({ type: 'key-up', code });
+  });
+
+  const video = document.getElementById('remote-video');
+  const viewport = document.querySelector('.viewer-viewport');
+  viewport.classList.remove('control-active');
+  document.getElementById('control-btn').textContent = 'Take Control';
+  document.getElementById('control-btn').classList.remove('active');
+  document.getElementById('control-indicator').classList.remove('visible');
+  video.style.cursor = '';
+}
+
+function toggleControl() {
+  if (controlActive) {
+    disableControl();
+  } else {
+    enableControl();
+  }
+}
+
+// Compute normalized coordinates (0-1) accounting for object-fit: contain letterboxing
+function getScaledCoords(e) {
+  const video = document.getElementById('remote-video');
+  const rect = video.getBoundingClientRect();
+
+  if (!video.videoWidth || !video.videoHeight) {
+    return { x: 0, y: 0, inBounds: false };
+  }
+
+  const videoAspect = video.videoWidth / video.videoHeight;
+  const elementAspect = rect.width / rect.height;
+
+  let renderW, renderH, offsetX, offsetY;
+
+  if (videoAspect > elementAspect) {
+    // Video wider than element — letterbox top/bottom
+    renderW = rect.width;
+    renderH = rect.width / videoAspect;
+    offsetX = 0;
+    offsetY = (rect.height - renderH) / 2;
+  } else {
+    // Video taller than element — letterbox left/right
+    renderH = rect.height;
+    renderW = rect.height * videoAspect;
+    offsetX = (rect.width - renderW) / 2;
+    offsetY = 0;
+  }
+
+  const relX = (e.clientX - rect.left - offsetX) / renderW;
+  const relY = (e.clientY - rect.top - offsetY) / renderH;
+
+  const x = Math.max(0, Math.min(1, relX));
+  const y = Math.max(0, Math.min(1, relY));
+
+  // Check if click is within the actual video area (not letterbox)
+  const inBounds = relX >= 0 && relX <= 1 && relY >= 0 && relY <= 1;
+
+  return { x, y, inBounds };
+}
+
+// --- Control toggle button ---
+document.getElementById('control-btn').addEventListener('click', toggleControl);
+
+// --- Mouse event listeners on the video element ---
+const remoteVideo = document.getElementById('remote-video');
+
+remoteVideo.addEventListener('mousemove', (e) => {
+  if (!controlActive) return;
+  const now = Date.now();
+  if (now - lastMouseMoveTime < MOUSE_THROTTLE_MS) return;
+  lastMouseMoveTime = now;
+
+  const coords = getScaledCoords(e);
+  if (!coords.inBounds) return;
+
+  window.electronAPI.sendInputCommand({
+    type: 'mouse-move',
+    x: coords.x,
+    y: coords.y,
+  });
+});
+
+remoteVideo.addEventListener('mousedown', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+  const button = ['left', 'middle', 'right'][e.button] || 'left';
+  const coords = getScaledCoords(e);
+
+  window.electronAPI.sendInputCommand({
+    type: 'mouse-down',
+    button,
+    x: coords.x,
+    y: coords.y,
+  });
+});
+
+remoteVideo.addEventListener('mouseup', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+  const button = ['left', 'middle', 'right'][e.button] || 'left';
+
+  window.electronAPI.sendInputCommand({
+    type: 'mouse-up',
+    button,
+  });
+});
+
+remoteVideo.addEventListener('wheel', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+
+  window.electronAPI.sendInputCommand({
+    type: 'mouse-scroll',
+    deltaX: e.deltaX,
+    deltaY: e.deltaY,
+  });
+}, { passive: false });
+
+remoteVideo.addEventListener('contextmenu', (e) => {
+  if (controlActive) e.preventDefault();
+});
+
+// Double-click on video to enter control mode (convenience shortcut)
+remoteVideo.addEventListener('dblclick', (e) => {
+  if (!controlActive && isJoined) {
+    e.preventDefault();
+    enableControl();
+  }
+});
+
+// --- Keyboard event listeners ---
+document.addEventListener('keydown', (e) => {
+  if (!controlActive) return;
+
+  // Escape releases control
+  if (e.code === 'Escape') {
+    disableControl();
+    return;
+  }
+
+  // Ctrl+Alt+Delete cannot be simulated from user-mode apps
+  if (e.ctrlKey && e.altKey && e.code === 'Delete') {
+    showToast('Ctrl+Alt+Delete cannot be sent remotely', 'info');
+    e.preventDefault();
+    return;
+  }
+
+  e.preventDefault();
+  window.electronAPI.sendInputCommand({
+    type: 'key-down',
+    code: e.code,
+    key: e.key,
+  });
+});
+
+document.addEventListener('keyup', (e) => {
+  if (!controlActive) return;
+  e.preventDefault();
+
+  window.electronAPI.sendInputCommand({
+    type: 'key-up',
+    code: e.code,
+    key: e.key,
+  });
+});
+
+// =============================================
 // WebRTC Initialization
 // =============================================
 
@@ -282,6 +482,11 @@ async function initHostWebRTC() {
 
     currentMonitorIndex = 0;
     renderMonitorPanel();
+
+    // Tell the main process which display is active (for input coordinate mapping)
+    if (screenSources[0].bounds) {
+      window.electronAPI.setActiveDisplay(screenSources[0].bounds);
+    }
 
     webrtcManager = new WebRTCManager();
     webrtcManager.createPeerConnection();
@@ -316,12 +521,14 @@ function initClientWebRTC() {
       statusEl.textContent = 'Connected';
     } else if (state === 'disconnected' || state === 'failed') {
       statusEl.textContent = 'Disconnected';
+      disableControl();
       showToast('Connection to host lost', 'error');
     }
   };
 }
 
 function cleanupWebRTC() {
+  disableControl();
   if (webrtcManager) {
     webrtcManager.destroy();
     webrtcManager = null;

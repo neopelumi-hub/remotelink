@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen } = require('electron');
 const path = require('path');
 const { io: ioClient } = require('socket.io-client');
 
@@ -6,6 +6,8 @@ const SERVER_URL = 'http://localhost:3000';
 
 let mainWindow;
 let socket = null;
+let inputController = null;
+let activeDisplayBounds = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -103,6 +105,19 @@ function connectSocket() {
     mainWindow?.webContents.send('server:session-event', { type: 'client-disconnected', ...data });
   });
 
+  // Remote input commands from client (handled directly in main process)
+  socket.on('input:command', (data) => {
+    if (!inputController) {
+      try {
+        inputController = require('../host/input-controller');
+      } catch (err) {
+        console.error('[Main] Failed to load input controller:', err.message);
+        return;
+      }
+    }
+    inputController.handleCommand(data, activeDisplayBounds);
+  });
+
   // Monitor switch request from client
   socket.on('monitor:switch-request', (data) => {
     mainWindow?.webContents.send('server:session-event', { type: 'monitor-switch-request', ...data });
@@ -176,18 +191,24 @@ ipcMain.handle('server:join-session', async (_event, sessionId) => {
   }
 });
 
-// Screen capture: enumerate available screens
+// Screen capture: enumerate available screens (includes display bounds for input mapping)
 ipcMain.handle('screen:get-sources', async () => {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
     thumbnailSize: { width: 320, height: 180 },
   });
-  return sources.map((s) => ({
-    id: s.id,
-    name: s.name,
-    thumbnail: s.thumbnail.toDataURL(),
-    display_id: s.display_id,
-  }));
+  const displays = screen.getAllDisplays();
+
+  return sources.map((s) => {
+    const display = displays.find(d => d.id.toString() === s.display_id);
+    return {
+      id: s.id,
+      name: s.name,
+      thumbnail: s.thumbnail.toDataURL(),
+      display_id: s.display_id,
+      bounds: display ? display.bounds : null,
+    };
+  });
 });
 
 // WebRTC signaling: forward signal from renderer to server
@@ -204,6 +225,19 @@ ipcMain.on('webrtc:send-signal', (_event, { type, payload }) => {
   } else {
     console.warn('[Main] Cannot send signal: socket not connected');
   }
+});
+
+// Remote input: client sends input commands to host via signaling
+ipcMain.on('input:send-command', (_event, data) => {
+  if (socket && socket.connected) {
+    socket.emit('input:command', data);
+  }
+});
+
+// Remote input: host sets which display is being shared (for coordinate mapping)
+ipcMain.on('input:set-active-display', (_event, bounds) => {
+  activeDisplayBounds = bounds;
+  console.log('[Main] Active display bounds set:', bounds);
 });
 
 // Disconnect from server
