@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendChatRead: (data) => ipcRenderer.send('chat:send-read', data),
   clearChat: () => ipcRenderer.send('chat:clear'),
 
+  // Settings
+  getSettings: () => ipcRenderer.invoke('settings:get'),
+  updateSetting: (key, value) => ipcRenderer.invoke('settings:update', key, value),
+
   // File transfer
   selectFiles: () => ipcRenderer.invoke('transfer:select-files'),
   selectFolder: () => ipcRenderer.invoke('transfer:select-folder'),

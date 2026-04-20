@@ -235,6 +235,41 @@
           </div>
 
           <div class="settings-section">
+            <h3 class="settings-section-title">Startup & Tray</h3>
+            <p class="settings-desc">Configure how RemoteLink starts and behaves in the background.</p>
+            <div class="settings-field">
+              <div class="settings-toggle-info">
+                <label class="settings-field-label">Start with Windows</label>
+                <span class="settings-field-hint">Launch RemoteLink automatically when you log in</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-start-windows" checked>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="settings-field">
+              <div class="settings-toggle-info">
+                <label class="settings-field-label">Start minimized to tray</label>
+                <span class="settings-field-hint">Hide the window on startup and run in the system tray</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-start-minimized" checked>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="settings-field">
+              <div class="settings-toggle-info">
+                <label class="settings-field-label">Show notifications</label>
+                <span class="settings-field-hint">Display tray notifications on connect/disconnect events</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="toggle-show-notifications" checked>
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-section">
             <h3 class="settings-section-title">Trusted Machines</h3>
             <p class="settings-desc">Trusted machines can connect without requiring approval.</p>
             <div class="machines-list" id="trusted-machines-list">

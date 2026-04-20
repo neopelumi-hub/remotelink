@@ -59,6 +59,11 @@ function getOrCreateConfig(userDataPath) {
     machineName: os.hostname(),
     trustedMachines: {},
     connectedMachines: {},
+    settings: {
+      startWithWindows: true,
+      startMinimized: true,
+      showNotifications: true,
+    },
   };
   saveConfig(userDataPath, config);
   return config;
@@ -101,6 +106,29 @@ function isTrusted(userDataPath, machineId) {
   return !!(config?.trustedMachines?.[machineId]);
 }
 
+const DEFAULT_SETTINGS = {
+  startWithWindows: true,
+  startMinimized: true,
+  showNotifications: true,
+};
+
+function getSettings(userDataPath) {
+  const config = getOrCreateConfig(userDataPath);
+  if (!config.settings) {
+    config.settings = { ...DEFAULT_SETTINGS };
+    saveConfig(userDataPath, config);
+  }
+  return { ...DEFAULT_SETTINGS, ...config.settings };
+}
+
+function updateSetting(userDataPath, key, value) {
+  const config = getOrCreateConfig(userDataPath);
+  if (!config.settings) config.settings = { ...DEFAULT_SETTINGS };
+  config.settings[key] = value;
+  saveConfig(userDataPath, config);
+  return config.settings;
+}
+
 module.exports = {
   generateMachineId,
   getOrCreateConfig,
@@ -110,4 +138,6 @@ module.exports = {
   setTrusted,
   removeMachine,
   isTrusted,
+  getSettings,
+  updateSetting,
 };

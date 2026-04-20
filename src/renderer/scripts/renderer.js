@@ -94,8 +94,8 @@ function navigateToPage(pageId) {
 
 // --- Status helpers ---
 function setStatus(online) {
-  statusDot.classList.toggle('offline', !online);
-  statusDot.classList.toggle('online', online);
+  statusDot.classList.remove('offline', 'online', 'reconnecting');
+  statusDot.classList.add(online ? 'online' : 'offline');
   statusLabel.textContent = online ? 'Online' : 'Offline';
 }
 
@@ -659,6 +659,12 @@ async function renderSettingsPage() {
     document.getElementById('settings-machine-id').textContent = info.machineId;
     document.getElementById('settings-machine-name').textContent = info.machineName;
 
+    // Load and apply settings toggles
+    const settings = await window.electronAPI.getSettings();
+    document.getElementById('toggle-start-windows').checked = settings.startWithWindows;
+    document.getElementById('toggle-start-minimized').checked = settings.startMinimized;
+    document.getElementById('toggle-show-notifications').checked = settings.showNotifications;
+
     const result = await window.electronAPI.getTrustedMachines();
     const trusted = result.trusted || {};
     const entries = Object.entries(trusted);
@@ -1030,6 +1036,55 @@ window.electronAPI.onSessionEvent((event) => {
         joinBtn.classList.add('btn-success');
       }
       setStatus(false);
+      break;
+
+    case 'reconnecting':
+      setStatus(false);
+      statusLabel.textContent = 'Reconnecting...';
+      statusDot.classList.remove('online', 'offline');
+      statusDot.classList.add('reconnecting');
+      break;
+
+    case 'hosting-resumed':
+      // Server reconnected and hosting was automatically resumed
+      isHosting = true;
+      idValueEl.textContent = event.sessionId;
+      hostBtn.textContent = 'Stop Hosting';
+      hostBtn.classList.remove('btn-primary');
+      hostBtn.classList.add('btn-danger');
+      hostBtn.disabled = false;
+      setStatus(true);
+      showToast('Reconnected — hosting resumed', 'success');
+      break;
+
+    case 'hosting-started':
+      // Hosting started from tray
+      isHosting = true;
+      idValueEl.textContent = event.sessionId;
+      hostBtn.textContent = 'Stop Hosting';
+      hostBtn.classList.remove('btn-primary');
+      hostBtn.classList.add('btn-danger');
+      hostBtn.disabled = false;
+      setStatus(true);
+      showToast('Hosting started from tray', 'success');
+      break;
+
+    case 'hosting-stopped':
+      // Hosting stopped from tray
+      if (webrtcManager) {
+        webrtcManager.destroy();
+        webrtcManager = null;
+      }
+      hideMonitorPanel();
+      clearChatUI();
+      isHosting = false;
+      idValueEl.textContent = '— — —';
+      hostBtn.textContent = 'Start Hosting';
+      hostBtn.classList.remove('btn-danger');
+      hostBtn.classList.add('btn-primary');
+      setStatus(false);
+      setTransferButtonsEnabled(false);
+      showToast('Hosting stopped from tray', 'info');
       break;
 
     case 'error':
@@ -1521,6 +1576,22 @@ function markChatAsRead() {
   updateChatBadge();
   window.electronAPI.sendChatRead({ messageId: lastMsg.id });
 }
+
+// =============================================
+// Settings Toggle Handlers
+// =============================================
+
+document.getElementById('toggle-start-windows').addEventListener('change', (e) => {
+  window.electronAPI.updateSetting('startWithWindows', e.target.checked);
+});
+
+document.getElementById('toggle-start-minimized').addEventListener('change', (e) => {
+  window.electronAPI.updateSetting('startMinimized', e.target.checked);
+});
+
+document.getElementById('toggle-show-notifications').addEventListener('change', (e) => {
+  window.electronAPI.updateSetting('showNotifications', e.target.checked);
+});
 
 // =============================================
 // Initialize
