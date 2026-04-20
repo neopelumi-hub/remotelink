@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, screen, dialog, shell, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen, dialog, shell, Tray, Menu, nativeImage, powerMonitor } = require('electron');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { execSync } = require('child_process');
@@ -7,10 +8,21 @@ const { io: ioClient } = require('socket.io-client');
 const machineConfig = require('../utils/machine-id');
 const { FileTransferManager } = require('../transfer/file-transfer');
 const { ChatManager } = require('../chat/index');
+const { ConsoleManager } = require('../console/index');
 
 const SERVER_URL = 'http://localhost:3000';
 const REGISTRY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const REGISTRY_NAME = 'RemoteLink';
+
+// --- Profile support for multi-instance testing on same machine ---
+const profileArg = process.argv.find(a => a.startsWith('--profile='));
+const profileName = profileArg ? profileArg.split('=')[1] : null;
+if (profileName) {
+  const fs = require('fs');
+  const profileDir = path.join(app.getPath('userData'), `profile-${profileName}`);
+  if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir, { recursive: true });
+  app.setPath('userData', profileDir);
+}
 
 let mainWindow;
 let tray = null;
@@ -26,6 +38,8 @@ let lastSessionId = null;
 const transferManager = new FileTransferManager();
 const progressThrottles = new Map(); // transferId -> last send time
 const chatManager = new ChatManager();
+const consoleManager = new ConsoleManager();
+let activityPollInterval = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -71,8 +85,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   userDataPath = app.getPath('userData');
-  config = machineConfig.getOrCreateConfig(userDataPath);
-  console.log('[Main] Machine ID:', config.machineId);
+  config = machineConfig.getOrCreateConfig(userDataPath, profileName);
+  console.log('[Main] Machine ID:', config.machineId, profileName ? `(profile: ${profileName})` : '');
 
   createTray();
   createWindow();
@@ -80,6 +94,12 @@ app.whenReady().then(() => {
   // Apply auto-start setting on first run
   const settings = machineConfig.getSettings(userDataPath);
   applyAutoStart(settings.startWithWindows);
+
+  // Auto-connect socket if user has a console role (master or node)
+  const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+  if (consoleConfig.role) {
+    connectSocket();
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -151,6 +171,9 @@ function connectSocket() {
         }
       });
     }
+
+    // Re-register console role on every connect/reconnect
+    setTimeout(() => registerConsoleRole(), 300);
 
     updateTrayMenu();
   });
@@ -400,7 +423,213 @@ function connectSocket() {
     mainWindow?.webContents.send('server:session-event', { type: 'access-timeout', ...data });
   });
 
+  // --- Console socket listeners (master-only events) ---
+  socket.on('console:node-registered', (data) => {
+    if (consoleManager.role !== 'master') return;
+    console.log('[Console] Node registered:', data.machineId, data.name);
+    consoleManager.updateNodeStatus(data.machineId, {
+      machineId: data.machineId,
+      name: data.name,
+      machineName: data.machineName,
+      status: data.status || 'online',
+      activity: data.activity || 'active',
+      registeredAt: data.registeredAt,
+      systemInfo: null,
+    });
+    mainWindow?.webContents.send('server:session-event', { type: 'console-nodes-updated', nodes: getConsoleNodesArray() });
+  });
+
+  socket.on('console:node-unregistered', (data) => {
+    if (consoleManager.role !== 'master') return;
+    consoleManager.unregisterNode(data.machineId);
+    mainWindow?.webContents.send('server:session-event', { type: 'console-nodes-updated', nodes: getConsoleNodesArray() });
+  });
+
+  socket.on('console:node-online', (data) => {
+    if (consoleManager.role !== 'master') return;
+    console.log('[Console] Node online:', data.machineId, data.name);
+    consoleManager.updateNodeStatus(data.machineId, {
+      machineId: data.machineId,
+      name: data.name,
+      machineName: data.machineName,
+      status: 'online',
+      activity: 'active',
+      systemInfo: null,
+    });
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'console-node-online',
+      ...data,
+      nodes: getConsoleNodesArray(),
+      alerts: consoleManager.alerts,
+      unreadCount: consoleManager.alertUnreadCount,
+    });
+  });
+
+  socket.on('console:node-offline', (data) => {
+    if (consoleManager.role !== 'master') return;
+    console.log('[Console] Node offline:', data.machineId);
+    consoleManager.updateNodeStatus(data.machineId, { status: 'offline', activity: 'offline' });
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'console-node-offline',
+      ...data,
+      nodes: getConsoleNodesArray(),
+      alerts: consoleManager.alerts,
+      unreadCount: consoleManager.alertUnreadCount,
+    });
+  });
+
+  socket.on('console:activity-update', (data) => {
+    if (consoleManager.role !== 'master') return;
+    consoleManager.updateNodeActivity(data.machineId, data.activity);
+    if (data.systemInfo) consoleManager.updateNodeSystemInfo(data.machineId, data.systemInfo);
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'console-activity-update',
+      ...data,
+      alerts: consoleManager.alerts,
+      unreadCount: consoleManager.alertUnreadCount,
+    });
+  });
+
+  socket.on('console:system-info', (data) => {
+    if (consoleManager.role !== 'master') return;
+    consoleManager.updateNodeSystemInfo(data.machineId, data.info);
+    mainWindow?.webContents.send('server:session-event', { type: 'console-system-info', ...data });
+  });
+
+  socket.on('console:node-renamed', (data) => {
+    if (consoleManager.role !== 'master') return;
+    consoleManager.renameNode(data.machineId, data.newName);
+    mainWindow?.webContents.send('server:session-event', { type: 'console-nodes-updated', nodes: getConsoleNodesArray() });
+  });
+
+  socket.on('console:master-revoked', () => {
+    consoleManager.revokeMaster();
+    machineConfig.clearConsoleRole(userDataPath);
+    stopActivityDetection();
+    mainWindow?.webContents.send('server:session-event', { type: 'console-master-revoked' });
+  });
+
+  socket.on('console:notification', (data) => {
+    mainWindow?.webContents.send('server:session-event', { type: 'console-notification', message: data.message });
+  });
+
+  socket.on('console:thumbnail-request', () => {
+    // Capture a thumbnail and send it back
+    const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+    if (consoleConfig.role === 'node' && consoleConfig.console.masterKey) {
+      desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 320, height: 180 } })
+        .then(sources => {
+          if (sources.length > 0 && socket.connected) {
+            socket.emit('console:thumbnail-response', {
+              masterKey: consoleConfig.console.masterKey,
+              thumbnail: sources[0].thumbnail.toDataURL(),
+            });
+          }
+        }).catch(() => {});
+    }
+  });
+
+  socket.on('console:thumbnail-response', (data) => {
+    mainWindow?.webContents.send('server:session-event', { type: 'console-thumbnail', ...data });
+  });
+
+  socket.on('console:connect-error', (data) => {
+    mainWindow?.webContents.send('server:session-event', { type: 'console-connect-error', error: data.error });
+  });
+
   return socket;
+}
+
+function registerConsoleRole() {
+  if (!socket || !socket.connected) return;
+  const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+  if (!consoleConfig.role) return;
+
+  if (consoleConfig.role === 'master' && consoleConfig.console.masterKey) {
+    consoleManager.role = 'master';
+    consoleManager.masterKey = consoleConfig.console.masterKey;
+    consoleManager.passwordHash = consoleConfig.console.passwordHash;
+    consoleManager.passwordSalt = consoleConfig.console.passwordSalt;
+    consoleManager.recoveryKeyHash = consoleConfig.console.recoveryKeyHash || null;
+    consoleManager.recoveryKeySalt = consoleConfig.console.recoveryKeySalt || null;
+
+    socket.emit('console:register-master', {
+      masterKey: consoleConfig.console.masterKey,
+      machineName: config.machineName,
+    }, (response) => {
+      if (response && response.nodes) {
+        consoleManager.updateNodeList(response.nodes);
+        mainWindow?.webContents.send('server:session-event', { type: 'console-nodes-updated', nodes: getConsoleNodesArray() });
+      }
+    });
+  } else if (consoleConfig.role === 'node' && consoleConfig.console.masterKey) {
+    consoleManager.role = 'node';
+    consoleManager.registeredMasterKey = consoleConfig.console.masterKey;
+    consoleManager.nodeFriendlyName = consoleConfig.console.nodeName;
+    consoleManager.idleTimeoutMinutes = consoleConfig.console.idleTimeout || 5;
+
+    socket.emit('console:register-node', {
+      masterKey: consoleConfig.console.masterKey,
+      machineName: config.machineName,
+      nodeName: consoleConfig.console.nodeName,
+    }, () => {});
+
+    startActivityDetection();
+  }
+}
+
+function getConsoleNodesArray() {
+  return Array.from(consoleManager.nodes.values());
+}
+
+function startActivityDetection() {
+  if (activityPollInterval) return;
+  const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+  const idleTimeout = (consoleConfig.console?.idleTimeout || 5) * 60;
+
+  activityPollInterval = setInterval(() => {
+    const idleTime = powerMonitor.getSystemIdleTime();
+    const newState = idleTime >= idleTimeout ? 'idle' : 'active';
+
+    if (newState !== consoleManager.lastActivityState) {
+      consoleManager.lastActivityState = newState;
+      const masterKey = consoleConfig.console?.masterKey;
+      if (socket && socket.connected && masterKey) {
+        const sysInfo = getLocalSystemInfo();
+        socket.emit('console:activity-update', {
+          masterKey,
+          machineId: config.machineId,
+          activity: newState,
+          systemInfo: sysInfo,
+        });
+      }
+    }
+  }, 30000);
+}
+
+function stopActivityDetection() {
+  if (activityPollInterval) {
+    clearInterval(activityPollInterval);
+    activityPollInterval = null;
+  }
+  consoleManager.lastActivityState = null;
+}
+
+function getLocalSystemInfo() {
+  const cpus = os.cpus();
+  const cpuModel = cpus[0]?.model || 'Unknown';
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  return {
+    platform: os.platform(),
+    hostname: os.hostname(),
+    cpuModel,
+    cpuCores: cpus.length,
+    totalMemory: totalMem,
+    freeMemory: freeMem,
+    usedMemoryPercent: Math.round(((totalMem - freeMem) / totalMem) * 100),
+    uptime: os.uptime(),
+  };
 }
 
 // --- Machine info ---
@@ -901,6 +1130,230 @@ function getAutoStartEnabled() {
     return false;
   }
 }
+
+// =============================================
+// Console IPC handlers
+// =============================================
+
+ipcMain.handle('console:get-config', () => {
+  return machineConfig.getConsoleConfig(userDataPath);
+});
+
+ipcMain.handle('console:setup-master', async (_event, password) => {
+  const { masterKey, recoveryKey } = consoleManager.setupMaster(password);
+  machineConfig.setConsoleRole(userDataPath, 'master', {
+    masterKey,
+    passwordHash: consoleManager.passwordHash,
+    passwordSalt: consoleManager.passwordSalt,
+    recoveryKeyHash: consoleManager.recoveryKeyHash,
+    recoveryKeySalt: consoleManager.recoveryKeySalt,
+  });
+
+  // Ensure socket is connected for console communication
+  const sock = connectSocket();
+  const waitForConnect = () => new Promise((resolve) => {
+    if (sock.connected) return resolve();
+    const timeout = setTimeout(resolve, 3000);
+    sock.once('connect', () => { clearTimeout(timeout); resolve(); });
+  });
+  await waitForConnect();
+
+  if (sock.connected) {
+    await new Promise((resolve) => {
+      sock.emit('console:register-master', {
+        masterKey,
+        machineName: config.machineName,
+      }, (response) => {
+        if (response && response.nodes) {
+          consoleManager.updateNodeList(response.nodes);
+          mainWindow?.webContents.send('server:session-event', { type: 'console-nodes-updated', nodes: getConsoleNodesArray() });
+        }
+        resolve();
+      });
+      setTimeout(resolve, 3000); // timeout fallback
+    });
+  }
+
+  return { masterKey, recoveryKey };
+});
+
+ipcMain.handle('console:verify-password', (_event, password) => {
+  return consoleManager.verifyPassword(password, consoleManager.passwordHash, consoleManager.passwordSalt);
+});
+
+ipcMain.handle('console:recover-master', (_event, data) => {
+  const { recoveryKey, newPassword } = data;
+  const success = consoleManager.recoverWithKey(recoveryKey, newPassword);
+  if (success) {
+    machineConfig.setConsoleRole(userDataPath, 'master', {
+      masterKey: consoleManager.masterKey,
+      passwordHash: consoleManager.passwordHash,
+      passwordSalt: consoleManager.passwordSalt,
+      recoveryKeyHash: consoleManager.recoveryKeyHash,
+      recoveryKeySalt: consoleManager.recoveryKeySalt,
+    });
+  }
+  return { success };
+});
+
+ipcMain.on('console:revoke-master', () => {
+  const masterKey = consoleManager.masterKey;
+  consoleManager.revokeMaster();
+  machineConfig.clearConsoleRole(userDataPath);
+  if (socket && socket.connected && masterKey) {
+    socket.emit('console:revoke-master', { masterKey });
+  }
+});
+
+ipcMain.handle('console:register-node', async (_event, data) => {
+  const { masterKey, nodeName } = data;
+  machineConfig.setConsoleRole(userDataPath, 'node', {
+    masterKey,
+    nodeName,
+  });
+  consoleManager.role = 'node';
+  consoleManager.registeredMasterKey = masterKey;
+  consoleManager.nodeFriendlyName = nodeName;
+
+  // Ensure socket is connected for console communication
+  const sock = connectSocket();
+  if (!sock.connected) {
+    await new Promise((resolve) => {
+      const timeout = setTimeout(resolve, 3000);
+      sock.once('connect', () => { clearTimeout(timeout); resolve(); });
+    });
+  }
+
+  if (sock.connected) {
+    return new Promise((resolve) => {
+      sock.emit('console:register-node', {
+        masterKey,
+        machineName: config.machineName,
+        nodeName,
+      }, (response) => {
+        if (response && response.error) {
+          // Rollback
+          machineConfig.clearConsoleRole(userDataPath);
+          consoleManager.revokeMaster();
+          resolve({ error: response.error });
+        } else {
+          startActivityDetection();
+          resolve({ success: true });
+        }
+      });
+      setTimeout(() => resolve({ success: true }), 3000); // timeout fallback
+    });
+  }
+  return { success: true };
+});
+
+ipcMain.on('console:unregister-node', () => {
+  const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+  const masterKey = consoleConfig.console?.masterKey;
+  machineConfig.clearConsoleRole(userDataPath);
+  consoleManager.revokeMaster();
+  stopActivityDetection();
+
+  if (socket && socket.connected && masterKey) {
+    socket.emit('console:unregister-node', { masterKey, machineId: config.machineId });
+  }
+});
+
+ipcMain.handle('console:get-nodes', async () => {
+  // Fetch fresh from server if connected
+  if (socket && socket.connected && consoleManager.masterKey) {
+    return new Promise((resolve) => {
+      socket.emit('console:get-nodes', { masterKey: consoleManager.masterKey }, (response) => {
+        if (response && response.nodes) {
+          consoleManager.updateNodeList(response.nodes);
+          resolve(getConsoleNodesArray());
+        } else {
+          resolve(getConsoleNodesArray());
+        }
+      });
+      // Timeout fallback in case server doesn't respond
+      setTimeout(() => resolve(getConsoleNodesArray()), 3000);
+    });
+  }
+  return getConsoleNodesArray();
+});
+
+ipcMain.on('console:quick-connect', (_event, machineId) => {
+  if (socket && socket.connected) {
+    socket.emit('console:connect-to-node', {
+      masterKey: consoleManager.masterKey,
+      targetMachineId: machineId,
+    });
+  }
+});
+
+ipcMain.handle('console:get-alerts', () => {
+  return { alerts: consoleManager.alerts, unreadCount: consoleManager.alertUnreadCount };
+});
+
+ipcMain.on('console:dismiss-alert', (_event, alertId) => {
+  consoleManager.dismissAlert(alertId);
+  mainWindow?.webContents.send('server:session-event', {
+    type: 'console-alert-update',
+    alerts: consoleManager.alerts,
+    unreadCount: consoleManager.alertUnreadCount,
+  });
+});
+
+ipcMain.on('console:dismiss-all-alerts', () => {
+  consoleManager.dismissAllAlerts();
+  mainWindow?.webContents.send('server:session-event', {
+    type: 'console-alert-update',
+    alerts: consoleManager.alerts,
+    unreadCount: consoleManager.alertUnreadCount,
+  });
+});
+
+ipcMain.on('console:rename-node', (_event, data) => {
+  const { machineId, newName } = data;
+  consoleManager.renameNode(machineId, newName);
+  if (socket && socket.connected) {
+    socket.emit('console:rename-node', { masterKey: consoleManager.masterKey, machineId, newName });
+  }
+});
+
+ipcMain.on('console:remove-node', (_event, machineId) => {
+  consoleManager.unregisterNode(machineId);
+  if (socket && socket.connected) {
+    socket.emit('console:unregister-node', { masterKey: consoleManager.masterKey, machineId });
+  }
+  mainWindow?.webContents.send('server:session-event', { type: 'console-nodes-updated', nodes: getConsoleNodesArray() });
+});
+
+ipcMain.on('console:send-notification', (_event, data) => {
+  if (socket && socket.connected) {
+    socket.emit('console:send-notification', { masterKey: consoleManager.masterKey, ...data });
+  }
+});
+
+ipcMain.on('console:request-thumbnail', (_event, machineId) => {
+  if (socket && socket.connected) {
+    socket.emit('console:request-thumbnail', { masterKey: consoleManager.masterKey, targetMachineId: machineId });
+  }
+});
+
+ipcMain.handle('console:get-system-info', () => {
+  return getLocalSystemInfo();
+});
+
+ipcMain.on('console:set-idle-timeout', (_event, minutes) => {
+  consoleManager.idleTimeoutMinutes = minutes;
+  const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+  machineConfig.setConsoleRole(userDataPath, consoleConfig.role, {
+    ...consoleConfig.console,
+    idleTimeout: minutes,
+  });
+  // Restart activity detection with new timeout
+  if (consoleConfig.role === 'node') {
+    stopActivityDetection();
+    startActivityDetection();
+  }
+});
 
 // =============================================
 // Settings IPC handlers

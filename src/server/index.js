@@ -5,6 +5,8 @@
 
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 3000;
@@ -21,6 +23,38 @@ const machineRegistry = new Map();
 const socketToMachine = new Map();
 // Pending access requests: requestId -> { clientSocketId, hostSocketId, sessionId, clientMachineId, clientMachineName, timer }
 const pendingRequests = new Map();
+
+// --- Console Registry Persistence ---
+const REGISTRY_PATH = path.join(__dirname, 'console-registry.json');
+
+function loadConsoleRegistry() {
+  try {
+    return JSON.parse(fs.readFileSync(REGISTRY_PATH, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveConsoleRegistry(registry) {
+  fs.writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2), 'utf-8');
+}
+
+function getNodesForMaster(masterKey, registry) {
+  const entry = registry[masterKey];
+  if (!entry || !entry.nodes) return [];
+  return Object.entries(entry.nodes).map(([machineId, nodeData]) => {
+    const machineInfo = machineRegistry.get(machineId);
+    return {
+      machineId,
+      name: nodeData.name,
+      machineName: machineInfo?.machineName || nodeData.name,
+      registeredAt: nodeData.registeredAt,
+      status: machineInfo ? 'online' : 'offline',
+      activity: 'active',
+      systemInfo: null,
+    };
+  });
+}
 
 function generateSessionId() {
   let id;
@@ -53,6 +87,20 @@ io.on('connection', (socket) => {
     machineRegistry.set(machineId, { socketId: socket.id, machineName });
     socketToMachine.set(socket.id, machineId);
     console.log(`[register] machine ${machineId} (${machineName}) -> ${socket.id}`);
+
+    // Notify console masters if this machine is a registered node
+    const registry = loadConsoleRegistry();
+    for (const [masterKey, entry] of Object.entries(registry)) {
+      if (entry.nodes && entry.nodes[machineId]) {
+        socket.join(`console:${masterKey}`);
+        io.to(`console:${masterKey}`).emit('console:node-online', {
+          machineId,
+          machineName,
+          name: entry.nodes[machineId].name,
+        });
+      }
+    }
+
     if (typeof callback === 'function') callback({ success: true });
   });
 
@@ -260,6 +308,187 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- Console events ---
+  socket.on('console:register-master', (data, callback) => {
+    const { masterKey, machineName } = data;
+    const machineId = socketToMachine.get(socket.id);
+    const registry = loadConsoleRegistry();
+
+    if (!registry[masterKey]) {
+      registry[masterKey] = { masterMachineId: machineId, masterName: machineName, nodes: {} };
+    } else {
+      registry[masterKey].masterMachineId = machineId;
+      registry[masterKey].masterName = machineName;
+    }
+    saveConsoleRegistry(registry);
+
+    socket.join(`console:${masterKey}`);
+    const nodes = getNodesForMaster(masterKey, registry);
+    console.log(`[console] master registered: ${masterKey} (${machineName})`);
+    if (typeof callback === 'function') callback({ success: true, nodes });
+  });
+
+  socket.on('console:register-node', (data, callback) => {
+    const { masterKey, machineName, nodeName } = data;
+    const machineId = socketToMachine.get(socket.id);
+    const registry = loadConsoleRegistry();
+
+    if (!registry[masterKey]) {
+      if (typeof callback === 'function') callback({ error: 'Master key not found.' });
+      return;
+    }
+
+    registry[masterKey].nodes[machineId] = {
+      name: nodeName || machineName,
+      registeredAt: new Date().toISOString(),
+    };
+    saveConsoleRegistry(registry);
+
+    socket.join(`console:${masterKey}`);
+
+    // Notify master
+    io.to(`console:${masterKey}`).emit('console:node-registered', {
+      machineId,
+      name: nodeName || machineName,
+      machineName,
+      status: 'online',
+      activity: 'active',
+      registeredAt: registry[masterKey].nodes[machineId].registeredAt,
+    });
+
+    console.log(`[console] node registered: ${machineId} (${nodeName}) to master ${masterKey}`);
+    if (typeof callback === 'function') callback({ success: true });
+  });
+
+  socket.on('console:unregister-node', (data) => {
+    const { masterKey, machineId } = data;
+    const registry = loadConsoleRegistry();
+    if (registry[masterKey] && registry[masterKey].nodes[machineId]) {
+      delete registry[masterKey].nodes[machineId];
+      saveConsoleRegistry(registry);
+      io.to(`console:${masterKey}`).emit('console:node-unregistered', { machineId });
+      console.log(`[console] node unregistered: ${machineId} from master ${masterKey}`);
+    }
+  });
+
+  socket.on('console:rename-node', (data) => {
+    const { masterKey, machineId, newName } = data;
+    const registry = loadConsoleRegistry();
+    if (registry[masterKey] && registry[masterKey].nodes[machineId]) {
+      registry[masterKey].nodes[machineId].name = newName;
+      saveConsoleRegistry(registry);
+      io.to(`console:${masterKey}`).emit('console:node-renamed', { machineId, newName });
+    }
+  });
+
+  socket.on('console:revoke-master', (data) => {
+    const { masterKey } = data;
+    const registry = loadConsoleRegistry();
+    if (registry[masterKey]) {
+      // Notify all nodes in the room
+      io.to(`console:${masterKey}`).emit('console:master-revoked', { masterKey });
+      delete registry[masterKey];
+      saveConsoleRegistry(registry);
+      console.log(`[console] master revoked: ${masterKey}`);
+    }
+  });
+
+  socket.on('console:get-nodes', (data, callback) => {
+    const { masterKey } = data;
+    const registry = loadConsoleRegistry();
+    const nodes = getNodesForMaster(masterKey, registry);
+    if (typeof callback === 'function') callback({ nodes });
+  });
+
+  socket.on('console:activity-update', (data) => {
+    const { masterKey, machineId, activity, systemInfo } = data;
+    io.to(`console:${masterKey}`).emit('console:activity-update', { machineId, activity, systemInfo });
+  });
+
+  socket.on('console:system-info', (data) => {
+    const { masterKey, machineId, info } = data;
+    io.to(`console:${masterKey}`).emit('console:system-info', { machineId, info });
+  });
+
+  socket.on('console:connect-to-node', (data) => {
+    const { masterKey, targetMachineId } = data;
+    const masterMachineId = socketToMachine.get(socket.id);
+    const masterInfo = machineRegistry.get(masterMachineId);
+    const targetInfo = machineRegistry.get(targetMachineId);
+
+    if (!targetInfo) {
+      socket.emit('console:connect-error', { error: 'Node is offline.' });
+      return;
+    }
+
+    // Trigger the standard join-machine flow from master to node
+    const hostSocketId = targetInfo.socketId;
+    const sessionId = socketToSession.get(hostSocketId);
+
+    if (!sessionId) {
+      socket.emit('console:connect-error', { error: 'Node is not hosting a session.' });
+      return;
+    }
+
+    const session = sessions.get(sessionId);
+    if (session && session.clientSocketId) {
+      socket.emit('console:connect-error', { error: 'Node already has a connected client.' });
+      return;
+    }
+
+    // Create access request like client:join-machine
+    const requestId = crypto.randomBytes(16).toString('hex');
+    const timer = setTimeout(() => {
+      const req = pendingRequests.get(requestId);
+      if (req) {
+        pendingRequests.delete(requestId);
+        io.to(req.clientSocketId).emit('access:denied', { reason: 'Request timed out.' });
+        io.to(req.hostSocketId).emit('access:timeout', { requestId });
+      }
+    }, ACCESS_TIMEOUT_MS);
+
+    pendingRequests.set(requestId, {
+      clientSocketId: socket.id,
+      hostSocketId,
+      sessionId,
+      clientMachineId: masterMachineId,
+      clientMachineName: masterInfo?.machineName || 'Master Console',
+      timer,
+    });
+
+    io.to(hostSocketId).emit('access:request', {
+      requestId,
+      clientMachineId: masterMachineId,
+      clientMachineName: masterInfo?.machineName || 'Master Console',
+    });
+
+    console.log(`[console] quick-connect from master to node ${targetMachineId}`);
+  });
+
+  socket.on('console:send-notification', (data) => {
+    const { masterKey, targetMachineId, message } = data;
+    const target = machineRegistry.get(targetMachineId);
+    if (target) {
+      io.to(target.socketId).emit('console:notification', { message, masterKey });
+    }
+  });
+
+  socket.on('console:request-thumbnail', (data) => {
+    const { masterKey, targetMachineId } = data;
+    const target = machineRegistry.get(targetMachineId);
+    if (target) {
+      io.to(target.socketId).emit('console:thumbnail-request', { masterKey });
+    }
+  });
+
+  socket.on('console:thumbnail-response', (data) => {
+    const { masterKey, thumbnail } = data;
+    io.to(`console:${masterKey}`).emit('console:thumbnail-response', {
+      machineId: socketToMachine.get(socket.id),
+      thumbnail,
+    });
+  });
+
   // --- Disconnection ---
   socket.on('disconnect', () => {
     const sessionId = socketToSession.get(socket.id);
@@ -267,6 +496,14 @@ io.on('connection', (socket) => {
 
     // Clean up machine registry
     if (machineId) {
+      // Notify console masters if this was a registered node
+      const registry = loadConsoleRegistry();
+      for (const [masterKey, entry] of Object.entries(registry)) {
+        if (entry.nodes && entry.nodes[machineId]) {
+          io.to(`console:${masterKey}`).emit('console:node-offline', { machineId });
+        }
+      }
+
       machineRegistry.delete(machineId);
       socketToMachine.delete(socket.id);
       console.log(`[unregister] machine ${machineId}`);

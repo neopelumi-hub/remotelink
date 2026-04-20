@@ -1,0 +1,12 @@
+{
+  "B2B4AE": {
+    "masterMachineId": "F7F7-0AF2-6236",
+    "masterName": "Olusola",
+    "nodes": {
+      "EBDE-CA38-A714": {
+        "name": "MY Node Computer",
+        "registeredAt": "2026-04-20T14:09:30.380Z"
+      }
+    }
+  }
+}

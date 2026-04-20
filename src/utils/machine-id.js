@@ -27,8 +27,8 @@ function getHardwareFingerprint() {
   return `${mac}|${cpu}|${hostname}`;
 }
 
-function generateMachineId() {
-  const fingerprint = getHardwareFingerprint();
+function generateMachineId(suffix) {
+  const fingerprint = getHardwareFingerprint() + (suffix ? `|${suffix}` : '');
   const hash = crypto.createHash('sha256').update(fingerprint).digest('hex');
   const short = hash.substring(0, 12).toUpperCase();
   return `${short.slice(0, 4)}-${short.slice(4, 8)}-${short.slice(8, 12)}`;
@@ -50,12 +50,34 @@ function saveConfig(userDataPath, config) {
   fs.writeFileSync(getConfigPath(userDataPath), JSON.stringify(config, null, 2), 'utf-8');
 }
 
-function getOrCreateConfig(userDataPath) {
+function getOrCreateConfig(userDataPath, profileSuffix) {
   let config = loadConfig(userDataPath);
-  if (config && config.machineId) return config;
+  if (config && config.machineId) {
+    // Migration: add console fields if missing
+    if (!('role' in config)) {
+      config.role = null;
+      config.console = {
+        masterKey: null,
+        passwordHash: null,
+        passwordSalt: null,
+        recoveryKeyHash: null,
+        recoveryKeySalt: null,
+        nodeName: null,
+        idleTimeout: 5,
+      };
+      saveConfig(userDataPath, config);
+    }
+    // Migration: add recovery fields if missing
+    if (config.console && !('recoveryKeyHash' in config.console)) {
+      config.console.recoveryKeyHash = null;
+      config.console.recoveryKeySalt = null;
+      saveConfig(userDataPath, config);
+    }
+    return config;
+  }
 
   config = {
-    machineId: generateMachineId(),
+    machineId: generateMachineId(profileSuffix),
     machineName: os.hostname(),
     trustedMachines: {},
     connectedMachines: {},
@@ -64,6 +86,45 @@ function getOrCreateConfig(userDataPath) {
       startMinimized: true,
       showNotifications: true,
     },
+    role: null,
+    console: {
+      masterKey: null,
+      passwordHash: null,
+      passwordSalt: null,
+      recoveryKeyHash: null,
+      recoveryKeySalt: null,
+      nodeName: null,
+      idleTimeout: 5,
+    },
+  };
+  saveConfig(userDataPath, config);
+  return config;
+}
+
+function setConsoleRole(userDataPath, role, consoleData) {
+  const config = getOrCreateConfig(userDataPath);
+  config.role = role;
+  config.console = { ...config.console, ...consoleData };
+  saveConfig(userDataPath, config);
+  return config;
+}
+
+function getConsoleConfig(userDataPath) {
+  const config = getOrCreateConfig(userDataPath);
+  return { role: config.role, console: config.console };
+}
+
+function clearConsoleRole(userDataPath) {
+  const config = getOrCreateConfig(userDataPath);
+  config.role = null;
+  config.console = {
+    masterKey: null,
+    passwordHash: null,
+    passwordSalt: null,
+    recoveryKeyHash: null,
+    recoveryKeySalt: null,
+    nodeName: null,
+    idleTimeout: 5,
   };
   saveConfig(userDataPath, config);
   return config;
@@ -140,4 +201,7 @@ module.exports = {
   isTrusted,
   getSettings,
   updateSetting,
+  setConsoleRole,
+  getConsoleConfig,
+  clearConsoleRole,
 };

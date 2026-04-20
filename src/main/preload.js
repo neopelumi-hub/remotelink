@@ -47,6 +47,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelTransfer: (data) => ipcRenderer.send('transfer:cancel', data),
   openDownloadsFolder: () => ipcRenderer.send('transfer:open-downloads'),
 
+  // Console management
+  getConsoleConfig: () => ipcRenderer.invoke('console:get-config'),
+  setupMaster: (password) => ipcRenderer.invoke('console:setup-master', password),
+  verifyMasterPassword: (password) => ipcRenderer.invoke('console:verify-password', password),
+  recoverMaster: (data) => ipcRenderer.invoke('console:recover-master', data),
+  revokeMaster: () => ipcRenderer.send('console:revoke-master'),
+  registerNode: (data) => ipcRenderer.invoke('console:register-node', data),
+  unregisterNode: () => ipcRenderer.send('console:unregister-node'),
+  getConsoleNodes: () => ipcRenderer.invoke('console:get-nodes'),
+  quickConnectToNode: (machineId) => ipcRenderer.send('console:quick-connect', machineId),
+  getConsoleAlerts: () => ipcRenderer.invoke('console:get-alerts'),
+  dismissConsoleAlert: (id) => ipcRenderer.send('console:dismiss-alert', id),
+  dismissAllConsoleAlerts: () => ipcRenderer.send('console:dismiss-all-alerts'),
+  renameConsoleNode: (data) => ipcRenderer.send('console:rename-node', data),
+  removeConsoleNode: (machineId) => ipcRenderer.send('console:remove-node', machineId),
+  sendConsoleNotification: (data) => ipcRenderer.send('console:send-notification', data),
+  requestNodeThumbnail: (machineId) => ipcRenderer.send('console:request-thumbnail', machineId),
+  getSystemInfo: () => ipcRenderer.invoke('console:get-system-info'),
+  setIdleTimeout: (minutes) => ipcRenderer.send('console:set-idle-timeout', minutes),
+
   // Session events from server
   onSessionEvent: (callback) => {
     ipcRenderer.on('server:session-event', (_event, data) => callback(data));

@@ -34,6 +34,14 @@ let currentAccessRequest = null;
 let accessTimerInterval = null;
 let accessCountdown = 30;
 
+// --- Console state ---
+let consoleRole = null;
+let consoleMasterKey = null;
+let consoleNodes = new Map();
+let consoleAlerts = [];
+let consoleUnreadCount = 0;
+let consoleManagingNodeId = null;
+
 // --- DOM Elements ---
 const statusDot = document.querySelector('.status-dot');
 const statusLabel = document.querySelector('.sidebar-footer .sidebar-label');
@@ -71,6 +79,12 @@ sidebarButtons.forEach(btn => {
     // Load settings data when navigating to settings page
     if (targetPage === 'settings') {
       renderSettingsPage();
+      renderConsoleSettings();
+    }
+
+    // Refresh + render console dashboard when navigating to console page
+    if (targetPage === 'console') {
+      refreshConsoleNodes();
     }
 
     // Mark chat messages as read when switching to chat page
@@ -133,6 +147,11 @@ async function initMachineInfo() {
     document.getElementById('machine-id-display').textContent = info.machineId;
     document.getElementById('settings-machine-id').textContent = info.machineId;
     document.getElementById('settings-machine-name').textContent = info.machineName;
+    const aboutId = document.getElementById('about-machine-id');
+    if (aboutId) {
+      const val = aboutId.querySelector('.about-machine-id-value');
+      if (val) val.textContent = info.machineId;
+    }
   } catch (err) {
     console.error('[Renderer] Failed to get machine info:', err);
   }
@@ -595,7 +614,7 @@ function showAccessModal(requestId, clientName, clientId) {
 
   document.getElementById('access-client-name').textContent = clientName;
   document.getElementById('access-client-id').textContent = clientId;
-  document.getElementById('access-modal').style.display = '';
+  showModal('access-modal');
 
   // Start countdown timer
   accessCountdown = 30;
@@ -618,7 +637,7 @@ function showAccessModal(requestId, clientName, clientId) {
 }
 
 function hideAccessModal() {
-  document.getElementById('access-modal').style.display = 'none';
+  hideModal('access-modal');
   if (accessTimerInterval) {
     clearInterval(accessTimerInterval);
     accessTimerInterval = null;
@@ -1090,6 +1109,90 @@ window.electronAPI.onSessionEvent((event) => {
     case 'error':
       showToast(event.message, 'error');
       break;
+
+    // --- Console events ---
+    case 'console-nodes-updated':
+      consoleNodes = new Map((event.nodes || []).map(n => [n.machineId, n]));
+      renderConsoleDashboard();
+      break;
+
+    case 'console-node-online':
+      // Use full nodes array if provided, otherwise update individually
+      if (event.nodes) {
+        consoleNodes = new Map(event.nodes.map(n => [n.machineId, n]));
+      } else if (consoleNodes.has(event.machineId)) {
+        const node = consoleNodes.get(event.machineId);
+        node.status = 'online';
+        node.activity = 'active';
+      } else {
+        consoleNodes.set(event.machineId, { machineId: event.machineId, name: event.name, machineName: event.machineName, status: 'online', activity: 'active' });
+      }
+      if (event.alerts) consoleAlerts = event.alerts;
+      if (event.unreadCount !== undefined) consoleUnreadCount = event.unreadCount;
+      updateConsoleBadge(consoleUnreadCount);
+      renderConsoleDashboard();
+      break;
+
+    case 'console-node-offline':
+      // Use full nodes array if provided, otherwise update individually
+      if (event.nodes) {
+        consoleNodes = new Map(event.nodes.map(n => [n.machineId, n]));
+      } else if (consoleNodes.has(event.machineId)) {
+        const node = consoleNodes.get(event.machineId);
+        node.status = 'offline';
+        node.activity = 'offline';
+      }
+      if (event.alerts) consoleAlerts = event.alerts;
+      if (event.unreadCount !== undefined) consoleUnreadCount = event.unreadCount;
+      updateConsoleBadge(consoleUnreadCount);
+      renderConsoleDashboard();
+      break;
+
+    case 'console-activity-update':
+      if (consoleNodes.has(event.machineId)) {
+        const node = consoleNodes.get(event.machineId);
+        node.activity = event.activity;
+        if (event.systemInfo) node.systemInfo = event.systemInfo;
+      }
+      if (event.alerts) consoleAlerts = event.alerts;
+      if (event.unreadCount !== undefined) consoleUnreadCount = event.unreadCount;
+      updateConsoleBadge(consoleUnreadCount);
+      renderConsoleDashboard();
+      break;
+
+    case 'console-system-info':
+      if (consoleNodes.has(event.machineId)) {
+        consoleNodes.get(event.machineId).systemInfo = event.info;
+      }
+      renderConsoleDashboard();
+      break;
+
+    case 'console-alert-update':
+      if (event.alerts) consoleAlerts = event.alerts;
+      if (event.unreadCount !== undefined) consoleUnreadCount = event.unreadCount;
+      updateConsoleBadge(consoleUnreadCount);
+      renderConsoleDashboard();
+      break;
+
+    case 'console-master-revoked':
+      consoleRole = null;
+      consoleMasterKey = null;
+      consoleNodes = new Map();
+      consoleAlerts = [];
+      consoleUnreadCount = 0;
+      hideConsoleSidebarButton();
+      updateConsoleBadge(0);
+      renderConsoleSettings();
+      showToast('Master console has been revoked', 'info');
+      break;
+
+    case 'console-notification':
+      showToast(event.message, 'info');
+      break;
+
+    case 'console-connect-error':
+      showToast(event.error, 'error');
+      break;
   }
 });
 
@@ -1242,11 +1345,11 @@ function showTransferModal(data) {
   document.getElementById('transfer-req-count').textContent = data.fileCount
     ? `${data.fileCount} file${data.fileCount > 1 ? 's' : ''}`
     : '';
-  document.getElementById('transfer-modal').style.display = '';
+  showModal('transfer-modal');
 }
 
 function hideTransferModal() {
-  document.getElementById('transfer-modal').style.display = 'none';
+  hideModal('transfer-modal');
   pendingTransferRequest = null;
 }
 
@@ -1594,6 +1697,539 @@ document.getElementById('toggle-show-notifications').addEventListener('change', 
 });
 
 // =============================================
+// Console Dashboard
+// =============================================
+
+async function initConsole() {
+  try {
+    const config = await window.electronAPI.getConsoleConfig();
+    consoleRole = config.role;
+    consoleMasterKey = config.console?.masterKey || null;
+
+    if (consoleRole === 'master') {
+      showConsoleSidebarButton();
+      const nodes = await window.electronAPI.getConsoleNodes();
+      consoleNodes = new Map((nodes || []).map(n => [n.machineId, n]));
+      const alertData = await window.electronAPI.getConsoleAlerts();
+      consoleAlerts = alertData.alerts || [];
+      consoleUnreadCount = alertData.unreadCount || 0;
+      updateConsoleBadge(consoleUnreadCount);
+    } else {
+      hideConsoleSidebarButton();
+    }
+    renderConsoleSettings();
+  } catch (e) {
+    console.error('[Console] Init error:', e);
+  }
+}
+
+function showConsoleSidebarButton() {
+  const btn = document.getElementById('sidebar-console');
+  if (btn) btn.style.display = '';
+}
+
+function hideConsoleSidebarButton() {
+  const btn = document.getElementById('sidebar-console');
+  if (btn) btn.style.display = 'none';
+}
+
+function updateConsoleBadge(count) {
+  const badge = document.getElementById('console-badge');
+  if (!badge) return;
+  if (count > 0) {
+    badge.textContent = count > 99 ? '99+' : count;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+async function refreshConsoleNodes() {
+  try {
+    const nodes = await window.electronAPI.getConsoleNodes();
+    consoleNodes = new Map((nodes || []).map(n => [n.machineId, n]));
+  } catch (e) {
+    console.error('[Console] Refresh error:', e);
+  }
+  renderConsoleDashboard();
+}
+
+function renderConsoleDashboard() {
+  renderNodeGrid();
+  renderAlertsFeed();
+}
+
+function renderNodeGrid() {
+  const grid = document.getElementById('console-node-grid');
+  if (!grid) return;
+
+  const count = document.getElementById('console-node-count');
+  if (count) count.textContent = `(${consoleNodes.size})`;
+
+  if (consoleNodes.size === 0) {
+    grid.innerHTML = `<div class="empty-state">
+      <svg viewBox="0 0 24 24" width="48" height="48"><path fill="var(--text-muted)" d="M4 2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6l2 3v1H8v-1l2-3H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 2v10h16V4H4z"/></svg>
+      <div class="empty-state-title">No nodes registered</div>
+      <div class="empty-state-subtitle">Register machines as nodes from Settings to monitor them here.</div>
+    </div>`;
+    return;
+  }
+
+  let html = '';
+  for (const [machineId, node] of consoleNodes) {
+    const status = node.activity || node.status || 'offline';
+    const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+    const name = node.name || node.machineName || machineId;
+    const sysInfo = node.systemInfo;
+    let infoLine = '';
+    if (sysInfo) {
+      infoLine = `${sysInfo.platform || ''} | ${sysInfo.cpuCores || '?'} cores | ${sysInfo.usedMemoryPercent || '?'}% mem`;
+    }
+
+    html += `
+      <div class="console-node-card ${status}" data-machine-id="${machineId}">
+        <div class="console-node-header">
+          <span class="console-node-name">${escapeHtml(name)}</span>
+          <span class="console-node-status ${status}">
+            <span class="status-indicator"></span>
+            ${statusLabel}
+          </span>
+        </div>
+        ${infoLine ? `<div class="console-node-info">${escapeHtml(infoLine)}</div>` : ''}
+        <div class="console-node-actions">
+          <button class="btn-node-connect" data-connect-id="${machineId}" ${status === 'offline' ? 'disabled' : ''}>Connect</button>
+          <button class="btn-node-manage" data-manage-id="${machineId}">Manage</button>
+        </div>
+      </div>
+    `;
+  }
+  grid.innerHTML = html;
+
+  // Attach event listeners
+  grid.querySelectorAll('.btn-node-connect').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      handleQuickConnect(btn.dataset.connectId);
+    });
+  });
+
+  grid.querySelectorAll('.btn-node-manage').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showNodeManageModal(btn.dataset.manageId);
+    });
+  });
+}
+
+function renderAlertsFeed() {
+  const feed = document.getElementById('console-alerts-feed');
+  if (!feed) return;
+
+  if (consoleAlerts.length === 0) {
+    feed.innerHTML = `<div class="empty-state">
+      <svg viewBox="0 0 24 24" width="40" height="40"><path fill="var(--text-muted)" d="M12 22c1.1 0 2-.9 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+      <div class="empty-state-title">No alerts yet</div>
+      <div class="empty-state-subtitle">Node status changes will appear here.</div>
+    </div>`;
+    return;
+  }
+
+  const shown = consoleAlerts.slice(0, 50);
+  let html = '';
+  for (const alert of shown) {
+    html += `
+      <div class="console-alert-item ${alert.read ? '' : 'unread'}">
+        <span class="console-alert-icon ${alert.priority}"></span>
+        <span class="console-alert-message">${escapeHtml(alert.message)}</span>
+        <span class="console-alert-time">${formatAlertTime(alert.timestamp)}</span>
+      </div>
+    `;
+  }
+  feed.innerHTML = html;
+}
+
+function formatAlertTime(timestamp) {
+  const diff = Date.now() - timestamp;
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 60) return 'now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function handleQuickConnect(machineId) {
+  window.electronAPI.quickConnectToNode(machineId);
+  showToast('Connecting to node...', 'info');
+}
+
+function showNodeManageModal(machineId) {
+  consoleManagingNodeId = machineId;
+  const node = consoleNodes.get(machineId);
+  if (!node) return;
+
+  const modal = document.getElementById('node-manage-modal');
+  document.getElementById('node-manage-title').textContent = node.name || node.machineName || 'Node Details';
+  document.getElementById('node-manage-id').textContent = machineId;
+  document.getElementById('node-manage-status').textContent = (node.activity || node.status || 'offline').charAt(0).toUpperCase() + (node.activity || node.status || 'offline').slice(1);
+  document.getElementById('node-manage-rename').value = node.name || '';
+  showModal('node-manage-modal');
+}
+
+function hideNodeManageModal() {
+  hideModal('node-manage-modal');
+  consoleManagingNodeId = null;
+}
+
+function renderConsoleSettings() {
+  const noRole = document.getElementById('console-no-role');
+  const masterInfo = document.getElementById('console-master-info');
+  const nodeInfo = document.getElementById('console-node-info');
+
+  if (!noRole || !masterInfo || !nodeInfo) return;
+
+  noRole.style.display = 'none';
+  masterInfo.style.display = 'none';
+  nodeInfo.style.display = 'none';
+
+  if (consoleRole === 'master') {
+    masterInfo.style.display = '';
+    document.getElementById('console-master-key-display').textContent = consoleMasterKey || '------';
+  } else if (consoleRole === 'node') {
+    nodeInfo.style.display = '';
+    document.getElementById('console-node-key-display').textContent = consoleMasterKey || '------';
+    window.electronAPI.getConsoleConfig().then(cfg => {
+      document.getElementById('console-node-name-display').textContent = cfg.console?.nodeName || '—';
+    });
+  } else {
+    noRole.style.display = '';
+  }
+}
+
+// --- Console Settings Button Handlers ---
+
+document.getElementById('btn-setup-master')?.addEventListener('click', () => {
+  showModal('master-setup-modal');
+  // Reset to step 1
+  document.getElementById('master-setup-step1').classList.add('active');
+  document.getElementById('master-setup-step2').classList.remove('active');
+  document.getElementById('master-password-input').value = '';
+  document.getElementById('master-password-confirm').value = '';
+  document.getElementById('master-setup-error').textContent = '';
+  document.getElementById('master-password-input').focus();
+});
+
+document.getElementById('master-setup-cancel')?.addEventListener('click', () => {
+  hideModal('master-setup-modal');
+});
+
+document.getElementById('master-setup-confirm')?.addEventListener('click', async () => {
+  const pass = document.getElementById('master-password-input').value;
+  const confirmVal = document.getElementById('master-password-confirm').value;
+  const errorEl = document.getElementById('master-setup-error');
+
+  if (!pass || pass.length < 4) {
+    errorEl.textContent = 'Password must be at least 4 characters.';
+    return;
+  }
+  if (pass !== confirmVal) {
+    errorEl.textContent = 'Passwords do not match.';
+    return;
+  }
+
+  const result = await window.electronAPI.setupMaster(pass);
+  if (result.masterKey) {
+    consoleRole = 'master';
+    consoleMasterKey = result.masterKey;
+    showConsoleSidebarButton();
+    renderConsoleSettings();
+
+    // Show step 2 with keys
+    document.getElementById('master-setup-step1').classList.remove('active');
+    document.getElementById('master-setup-step2').classList.add('active');
+    document.getElementById('setup-master-key-value').textContent = result.masterKey;
+    document.getElementById('setup-recovery-key-value').textContent = result.recoveryKey || '------';
+  }
+});
+
+document.getElementById('master-setup-done')?.addEventListener('click', () => {
+  hideModal('master-setup-modal');
+  showToast(`Master Console set up! Key: ${consoleMasterKey}`, 'success');
+});
+
+document.getElementById('setup-copy-master-key')?.addEventListener('click', () => {
+  const val = document.getElementById('setup-master-key-value')?.textContent;
+  if (val && val !== '------') {
+    navigator.clipboard.writeText(val);
+    showToast('Master key copied', 'success');
+  }
+});
+
+document.getElementById('setup-copy-recovery-key')?.addEventListener('click', () => {
+  const val = document.getElementById('setup-recovery-key-value')?.textContent;
+  if (val && val !== '------') {
+    navigator.clipboard.writeText(val);
+    showToast('Recovery key copied', 'success');
+  }
+});
+
+document.getElementById('btn-register-node')?.addEventListener('click', () => {
+  showModal('node-register-modal');
+  document.getElementById('node-master-key-input').value = '';
+  document.getElementById('node-friendly-name-input').value = '';
+  document.getElementById('node-register-error').textContent = '';
+  document.getElementById('node-master-key-input').focus();
+});
+
+document.getElementById('node-register-cancel')?.addEventListener('click', () => {
+  hideModal('node-register-modal');
+});
+
+document.getElementById('node-register-confirm')?.addEventListener('click', async () => {
+  const masterKey = document.getElementById('node-master-key-input').value.trim().toUpperCase();
+  const nodeName = document.getElementById('node-friendly-name-input').value.trim();
+  const errorEl = document.getElementById('node-register-error');
+
+  if (!masterKey || masterKey.length !== 6) {
+    errorEl.textContent = 'Master Key must be 6 characters.';
+    return;
+  }
+  if (!nodeName) {
+    errorEl.textContent = 'Please enter a friendly name.';
+    return;
+  }
+
+  const result = await window.electronAPI.registerNode({ masterKey, nodeName });
+  if (result.error) {
+    errorEl.textContent = result.error;
+    return;
+  }
+
+  consoleRole = 'node';
+  consoleMasterKey = masterKey;
+  hideConsoleSidebarButton();
+  renderConsoleSettings();
+  hideModal('node-register-modal');
+  showToast('Registered as node successfully!', 'success');
+});
+
+document.getElementById('btn-revoke-master')?.addEventListener('click', () => {
+  showModal('revoke-password-modal');
+  document.getElementById('revoke-password-input').value = '';
+  document.getElementById('revoke-password-error').textContent = '';
+  document.getElementById('revoke-password-input').focus();
+});
+
+document.getElementById('revoke-password-cancel')?.addEventListener('click', () => {
+  hideModal('revoke-password-modal');
+});
+
+document.getElementById('revoke-password-confirm')?.addEventListener('click', async () => {
+  const pass = document.getElementById('revoke-password-input').value;
+  const errorEl = document.getElementById('revoke-password-error');
+
+  if (!pass) {
+    errorEl.textContent = 'Please enter your password.';
+    return;
+  }
+
+  const valid = await window.electronAPI.verifyMasterPassword(pass);
+  if (!valid) {
+    errorEl.textContent = 'Incorrect password.';
+    return;
+  }
+
+  window.electronAPI.revokeMaster();
+  consoleRole = null;
+  consoleMasterKey = null;
+  consoleNodes = new Map();
+  consoleAlerts = [];
+  consoleUnreadCount = 0;
+  hideConsoleSidebarButton();
+  updateConsoleBadge(0);
+  renderConsoleSettings();
+  hideModal('revoke-password-modal');
+  showToast('Master console revoked.', 'info');
+});
+
+document.getElementById('btn-unregister-node')?.addEventListener('click', () => {
+  window.electronAPI.unregisterNode();
+  consoleRole = null;
+  consoleMasterKey = null;
+  renderConsoleSettings();
+  showToast('Unregistered from master console.', 'info');
+});
+
+// --- Console idle timeout selector ---
+document.getElementById('console-idle-timeout')?.addEventListener('change', (e) => {
+  window.electronAPI.setIdleTimeout(parseInt(e.target.value, 10));
+});
+
+// --- Dismiss All Alerts ---
+document.getElementById('btn-dismiss-all-alerts')?.addEventListener('click', () => {
+  window.electronAPI.dismissAllConsoleAlerts();
+  consoleAlerts.forEach(a => a.read = true);
+  consoleUnreadCount = 0;
+  updateConsoleBadge(0);
+  renderConsoleDashboard();
+});
+
+// --- Refresh nodes from server ---
+document.getElementById('btn-refresh-nodes')?.addEventListener('click', async () => {
+  const btn = document.getElementById('btn-refresh-nodes');
+  btn.textContent = 'Refreshing...';
+  btn.disabled = true;
+  try {
+    const nodes = await window.electronAPI.getConsoleNodes();
+    consoleNodes = new Map((nodes || []).map(n => [n.machineId, n]));
+    renderConsoleDashboard();
+    showToast('Node list refreshed', 'success');
+  } catch (e) {
+    showToast('Failed to refresh nodes', 'error');
+  }
+  btn.textContent = 'Refresh';
+  btn.disabled = false;
+});
+
+// --- Node Manage Modal handlers ---
+document.getElementById('node-manage-connect')?.addEventListener('click', () => {
+  if (consoleManagingNodeId) {
+    handleQuickConnect(consoleManagingNodeId);
+    hideNodeManageModal();
+  }
+});
+
+document.getElementById('node-manage-remove')?.addEventListener('click', () => {
+  if (consoleManagingNodeId) {
+    window.electronAPI.removeConsoleNode(consoleManagingNodeId);
+    consoleNodes.delete(consoleManagingNodeId);
+    renderConsoleDashboard();
+    hideNodeManageModal();
+    showToast('Node removed.', 'info');
+  }
+});
+
+document.getElementById('node-manage-close')?.addEventListener('click', () => {
+  // Save rename if changed
+  if (consoleManagingNodeId) {
+    const newName = document.getElementById('node-manage-rename').value.trim();
+    const node = consoleNodes.get(consoleManagingNodeId);
+    if (newName && node && newName !== node.name) {
+      window.electronAPI.renameConsoleNode({ machineId: consoleManagingNodeId, newName });
+      node.name = newName;
+      renderConsoleDashboard();
+    }
+  }
+  hideNodeManageModal();
+});
+
+// =============================================
+// About Section
+// =============================================
+
+function renderAboutSection() {
+  // Machine ID is already populated by initMachineInfo
+}
+
+document.getElementById('about-copy-machine-id')?.addEventListener('click', () => {
+  const val = document.querySelector('.about-machine-id-value');
+  if (val && val.textContent && val.textContent !== '--------------') {
+    navigator.clipboard.writeText(val.textContent);
+    showToast('Machine ID copied', 'success');
+  }
+});
+
+// =============================================
+// Modal Animation Helpers
+// =============================================
+
+function showModal(id) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.style.display = '';
+  requestAnimationFrame(() => {
+    modal.classList.add('modal-visible');
+  });
+}
+
+function hideModal(id) {
+  const modal = document.getElementById(id);
+  if (!modal) return;
+  modal.classList.remove('modal-visible');
+  setTimeout(() => {
+    modal.style.display = 'none';
+  }, 200);
+}
+
+// =============================================
+// Recovery Flow
+// =============================================
+
+document.getElementById('revoke-forgot-password')?.addEventListener('click', () => {
+  hideModal('revoke-password-modal');
+  showModal('master-recovery-modal');
+  document.getElementById('recovery-key-input').value = '';
+  document.getElementById('recovery-new-password').value = '';
+  document.getElementById('recovery-confirm-password').value = '';
+  document.getElementById('recovery-error').textContent = '';
+  document.getElementById('recovery-key-input').focus();
+});
+
+document.getElementById('recovery-cancel')?.addEventListener('click', () => {
+  hideModal('master-recovery-modal');
+});
+
+document.getElementById('recovery-confirm')?.addEventListener('click', async () => {
+  const recoveryKey = document.getElementById('recovery-key-input').value.trim().toUpperCase();
+  const newPassword = document.getElementById('recovery-new-password').value;
+  const confirmPassword = document.getElementById('recovery-confirm-password').value;
+  const errorEl = document.getElementById('recovery-error');
+
+  if (!recoveryKey) {
+    errorEl.textContent = 'Please enter your recovery key.';
+    return;
+  }
+  if (!newPassword || newPassword.length < 4) {
+    errorEl.textContent = 'New password must be at least 4 characters.';
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    errorEl.textContent = 'Passwords do not match.';
+    return;
+  }
+
+  const result = await window.electronAPI.recoverMaster({ recoveryKey, newPassword });
+  if (result.success) {
+    hideModal('master-recovery-modal');
+    showToast('Password reset successfully!', 'success');
+    renderConsoleSettings();
+  } else {
+    errorEl.textContent = 'Invalid recovery key.';
+  }
+});
+
+// =============================================
 // Initialize
 // =============================================
-initMachineInfo();
+async function init() {
+  await initMachineInfo();
+  await initConsole();
+  renderAboutSection();
+
+  // Dismiss loading screen
+  const loadingScreen = document.getElementById('loading-screen');
+  if (loadingScreen) {
+    loadingScreen.classList.add('loaded');
+    setTimeout(() => loadingScreen.remove(), 500);
+  }
+}
+
+init();
