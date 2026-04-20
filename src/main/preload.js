@@ -29,6 +29,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   sendInputCommand: (data) => ipcRenderer.send('input:send-command', data),
   setActiveDisplay: (bounds) => ipcRenderer.send('input:set-active-display', bounds),
 
+  // File transfer
+  selectFiles: () => ipcRenderer.invoke('transfer:select-files'),
+  selectFolder: () => ipcRenderer.invoke('transfer:select-folder'),
+  sendTransferRequest: (data) => ipcRenderer.send('transfer:send-request', data),
+  respondToTransfer: (data) => ipcRenderer.send('transfer:respond', data),
+  cancelTransfer: (data) => ipcRenderer.send('transfer:cancel', data),
+  openDownloadsFolder: () => ipcRenderer.send('transfer:open-downloads'),
+
   // Session events from server
   onSessionEvent: (callback) => {
     ipcRenderer.on('server:session-event', (_event, data) => callback(data));

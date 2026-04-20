@@ -9,6 +9,11 @@ let webrtcManager = null;
 let screenSources = [];
 let currentMonitorIndex = 0;
 
+// --- File transfer state ---
+const activeTransfers = new Map();
+let pendingTransferRequest = null;
+const transferRafPending = new Set();
+
 // --- Remote control state ---
 let controlActive = false;
 let lastMouseMoveTime = 0;
@@ -220,6 +225,7 @@ joinBtn.addEventListener('click', async () => {
     joinBtn.classList.remove('btn-success');
     joinBtn.classList.add('btn-joined');
     setStatus(true);
+    setTransferButtonsEnabled(true);
     showToast('Connected to session ' + result.sessionId, 'success');
   } else {
     // --- Machine ID mode (access control flow) ---
@@ -748,6 +754,7 @@ window.electronAPI.onSessionEvent((event) => {
     case 'client-joined':
       console.log('[Renderer] Client joined, isHosting:', isHosting);
       showToast('A client has connected to your session', 'success');
+      setTransferButtonsEnabled(true);
       if (isHosting) {
         initHostWebRTC();
       }
@@ -813,6 +820,7 @@ window.electronAPI.onSessionEvent((event) => {
       joinBtn.classList.remove('btn-success');
       joinBtn.classList.add('btn-joined');
       setStatus(true);
+      setTransferButtonsEnabled(true);
       showToast('Access granted — connected!', 'success');
       break;
 
@@ -830,6 +838,77 @@ window.electronAPI.onSessionEvent((event) => {
       }
       break;
 
+    // --- File transfer events ---
+    case 'transfer-request':
+      showTransferModal(event);
+      break;
+
+    case 'transfer-accepted': {
+      const t = activeTransfers.get(event.transferId);
+      if (t) {
+        t.status = 'sending';
+        t.startTime = Date.now();
+        renderTransferItem(event.transferId);
+      }
+      break;
+    }
+
+    case 'transfer-denied': {
+      const t = activeTransfers.get(event.transferId);
+      if (t) {
+        t.status = 'cancelled';
+        renderTransferItem(event.transferId);
+        showToast('Transfer denied by peer', 'info');
+      }
+      break;
+    }
+
+    case 'transfer-progress': {
+      const t = activeTransfers.get(event.transferId);
+      if (t) {
+        if (event.direction === 'outgoing') {
+          t.bytesSent = event.bytesSent;
+        } else {
+          t.bytesReceived = event.bytesReceived;
+        }
+        if (event.currentFile) t.currentFile = event.currentFile;
+        if (event.totalSize) t.totalSize = event.totalSize;
+        throttledRenderTransferItem(event.transferId);
+      }
+      break;
+    }
+
+    case 'transfer-complete': {
+      const t = activeTransfers.get(event.transferId);
+      if (t) {
+        t.status = 'complete';
+        renderTransferItem(event.transferId);
+        showToast(`Transfer complete: ${t.name}`, 'success');
+      }
+      break;
+    }
+
+    case 'transfer-cancelled': {
+      const t = activeTransfers.get(event.transferId);
+      if (t) {
+        t.status = 'cancelled';
+        renderTransferItem(event.transferId);
+        showToast('Transfer cancelled by peer', 'info');
+      }
+      break;
+    }
+
+    case 'transfer-error': {
+      const t = activeTransfers.get(event.transferId);
+      if (t) {
+        t.status = 'error';
+        t.errorMessage = event.message;
+        renderTransferItem(event.transferId);
+        showToast(`Transfer error: ${event.message}`, 'error');
+      }
+      break;
+    }
+
     // --- Disconnection events ---
     case 'host-disconnected':
       cleanupWebRTC();
@@ -840,18 +919,21 @@ window.electronAPI.onSessionEvent((event) => {
       joinBtn.classList.remove('btn-joined');
       joinBtn.classList.add('btn-success');
       setStatus(false);
+      setTransferButtonsEnabled(false);
       showToast('Host has disconnected', 'error');
       break;
 
     case 'client-disconnected':
       cleanupWebRTC();
       hideMonitorPanel();
+      setTransferButtonsEnabled(false);
       showToast('Client has disconnected', 'info');
       break;
 
     case 'disconnected':
       cleanupWebRTC();
       hideAccessModal();
+      setTransferButtonsEnabled(false);
       if (isHosting) {
         hideMonitorPanel();
         isHosting = false;
@@ -876,6 +958,251 @@ window.electronAPI.onSessionEvent((event) => {
       break;
   }
 });
+
+// =============================================
+// File Transfer UI
+// =============================================
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+}
+
+function formatEta(seconds) {
+  if (!seconds || !isFinite(seconds) || seconds <= 0) return '--';
+  if (seconds < 60) return `${Math.ceil(seconds)}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.ceil(seconds % 60)}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function renderTransferItem(transferId) {
+  const t = activeTransfers.get(transferId);
+  if (!t) return;
+
+  const list = document.getElementById('transfer-list');
+  const emptyEl = document.getElementById('transfer-empty');
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  let el = document.getElementById(`transfer-${transferId}`);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'transfer-item';
+    el.id = `transfer-${transferId}`;
+    list.appendChild(el);
+  }
+
+  const isOutgoing = t.direction === 'outgoing';
+  const icon = t.type === 'folder'
+    ? '<svg viewBox="0 0 24 24" width="28" height="28"><path fill="var(--accent-blue)" d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>'
+    : '<svg viewBox="0 0 24 24" width="28" height="28"><path fill="var(--accent-blue)" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM6 20V4h5v6h6v10H6z"/></svg>';
+
+  const dirBadge = isOutgoing
+    ? '<span class="transfer-item-direction outgoing">Sending</span>'
+    : '<span class="transfer-item-direction incoming">Receiving</span>';
+
+  const totalBytes = t.totalSize || 0;
+  const currentBytes = isOutgoing ? (t.bytesSent || 0) : (t.bytesReceived || 0);
+  const percent = totalBytes > 0 ? Math.min(100, Math.round((currentBytes / totalBytes) * 100)) : 0;
+
+  // Calculate speed/ETA
+  let speedText = '';
+  let etaText = '';
+  if (t.status === 'sending' || t.status === 'receiving') {
+    const now = Date.now();
+    const elapsed = (now - (t.startTime || now)) / 1000;
+    if (elapsed > 0.5) {
+      const speed = currentBytes / elapsed;
+      speedText = formatBytes(speed) + '/s';
+      const remaining = totalBytes - currentBytes;
+      etaText = speed > 0 ? formatEta(remaining / speed) : '--';
+    }
+  }
+
+  let statusLabel = '';
+  let progressSection = '';
+  let actions = '';
+
+  switch (t.status) {
+    case 'pending':
+      statusLabel = '<span class="transfer-item-status-label pending">Pending</span>';
+      actions = `<button class="btn-transfer-cancel" data-transfer-id="${transferId}">Cancel</button>`;
+      break;
+    case 'sending':
+    case 'receiving':
+      progressSection = `
+        <div class="transfer-progress-bar"><div class="transfer-progress-fill" style="width:${percent}%"></div></div>
+        <div class="transfer-progress-stats">
+          <span>${percent}% &middot; ${formatBytes(currentBytes)} / ${formatBytes(totalBytes)}</span>
+          <span>${speedText}${etaText ? ' &middot; ' + etaText + ' left' : ''}</span>
+        </div>
+        ${t.currentFile ? `<div class="transfer-item-current-file">${escapeHtml(t.currentFile)}</div>` : ''}
+      `;
+      actions = `<button class="btn-transfer-cancel" data-transfer-id="${transferId}">Cancel</button>`;
+      break;
+    case 'complete':
+      statusLabel = '<span class="transfer-item-status-label complete">Complete</span>';
+      actions = `<button class="btn-transfer-dismiss" data-transfer-id="${transferId}">Dismiss</button>`;
+      break;
+    case 'cancelled':
+      statusLabel = '<span class="transfer-item-status-label cancelled">Cancelled</span>';
+      actions = `<button class="btn-transfer-dismiss" data-transfer-id="${transferId}">Dismiss</button>`;
+      break;
+    case 'error':
+      statusLabel = `<span class="transfer-item-status-label error">Error${t.errorMessage ? ': ' + escapeHtml(t.errorMessage) : ''}</span>`;
+      actions = `<button class="btn-transfer-dismiss" data-transfer-id="${transferId}">Dismiss</button>`;
+      break;
+  }
+
+  const fileCountInfo = t.fileCount ? `${t.fileCount} file${t.fileCount > 1 ? 's' : ''}` : '';
+
+  el.innerHTML = `
+    <div class="transfer-item-icon">${icon}</div>
+    <div class="transfer-item-info">
+      <div class="transfer-item-name">${escapeHtml(t.name)}</div>
+      <div class="transfer-item-meta">${dirBadge} ${formatBytes(totalBytes)}${fileCountInfo ? ' &middot; ' + fileCountInfo : ''}</div>
+      ${statusLabel}
+      ${progressSection}
+    </div>
+    <div class="transfer-item-actions">${actions}</div>
+  `;
+
+  // Bind action buttons
+  const cancelBtn = el.querySelector('.btn-transfer-cancel');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', () => {
+      window.electronAPI.cancelTransfer({ transferId });
+      t.status = 'cancelled';
+      renderTransferItem(transferId);
+    });
+  }
+
+  const dismissBtn = el.querySelector('.btn-transfer-dismiss');
+  if (dismissBtn) {
+    dismissBtn.addEventListener('click', () => {
+      activeTransfers.delete(transferId);
+      el.remove();
+      if (activeTransfers.size === 0) {
+        const emptyEl = document.getElementById('transfer-empty');
+        if (emptyEl) emptyEl.style.display = '';
+      }
+    });
+  }
+}
+
+function throttledRenderTransferItem(transferId) {
+  if (transferRafPending.has(transferId)) return;
+  transferRafPending.add(transferId);
+  requestAnimationFrame(() => {
+    transferRafPending.delete(transferId);
+    renderTransferItem(transferId);
+  });
+}
+
+function showTransferModal(data) {
+  pendingTransferRequest = data;
+  document.getElementById('transfer-req-name').textContent = data.name || 'Unknown';
+  document.getElementById('transfer-req-type').textContent = data.type === 'folder' ? 'Folder' : 'File';
+  document.getElementById('transfer-req-size').textContent = 'Size: ' + formatBytes(data.totalSize || 0);
+  document.getElementById('transfer-req-count').textContent = data.fileCount
+    ? `${data.fileCount} file${data.fileCount > 1 ? 's' : ''}`
+    : '';
+  document.getElementById('transfer-modal').style.display = '';
+}
+
+function hideTransferModal() {
+  document.getElementById('transfer-modal').style.display = 'none';
+  pendingTransferRequest = null;
+}
+
+function respondToTransfer(accepted) {
+  if (!pendingTransferRequest) return;
+  const transferId = pendingTransferRequest.transferId;
+
+  window.electronAPI.respondToTransfer({ transferId, accepted });
+
+  if (accepted) {
+    activeTransfers.set(transferId, {
+      ...pendingTransferRequest,
+      direction: 'incoming',
+      status: 'receiving',
+      bytesReceived: 0,
+      startTime: Date.now(),
+    });
+    renderTransferItem(transferId);
+    showToast('Transfer accepted', 'success');
+  } else {
+    showToast('Transfer denied', 'info');
+  }
+
+  hideTransferModal();
+}
+
+// Transfer modal buttons
+document.getElementById('transfer-deny').addEventListener('click', () => respondToTransfer(false));
+document.getElementById('transfer-accept').addEventListener('click', () => respondToTransfer(true));
+
+// Send Files button
+document.getElementById('btn-send-files').addEventListener('click', async () => {
+  const transfers = await window.electronAPI.selectFiles();
+  if (!transfers) return;
+
+  for (const t of transfers) {
+    activeTransfers.set(t.transferId, {
+      ...t,
+      direction: 'outgoing',
+      status: 'pending',
+      bytesSent: 0,
+      fileCount: t.files ? t.files.length : 0,
+      startTime: Date.now(),
+    });
+    window.electronAPI.sendTransferRequest({
+      transferId: t.transferId,
+      name: t.name,
+      type: t.type,
+      totalSize: t.totalSize,
+      fileCount: t.files ? t.files.length : 0,
+    });
+    renderTransferItem(t.transferId);
+  }
+});
+
+// Send Folder button
+document.getElementById('btn-send-folder').addEventListener('click', async () => {
+  const transfers = await window.electronAPI.selectFolder();
+  if (!transfers) return;
+
+  for (const t of transfers) {
+    activeTransfers.set(t.transferId, {
+      ...t,
+      direction: 'outgoing',
+      status: 'pending',
+      bytesSent: 0,
+      fileCount: t.files ? t.files.length : 0,
+      startTime: Date.now(),
+    });
+    window.electronAPI.sendTransferRequest({
+      transferId: t.transferId,
+      name: t.name,
+      type: t.type,
+      totalSize: t.totalSize,
+      fileCount: t.files ? t.files.length : 0,
+    });
+    renderTransferItem(t.transferId);
+  }
+});
+
+// Open Downloads button
+document.getElementById('btn-open-downloads').addEventListener('click', () => {
+  window.electronAPI.openDownloadsFolder();
+});
+
+// Enable/disable transfer buttons based on connection state
+function setTransferButtonsEnabled(enabled) {
+  document.getElementById('btn-send-files').disabled = !enabled;
+  document.getElementById('btn-send-folder').disabled = !enabled;
+}
 
 // =============================================
 // Initialize

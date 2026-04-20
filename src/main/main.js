@@ -1,7 +1,9 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen, dialog, shell } = require('electron');
 const path = require('path');
+const crypto = require('crypto');
 const { io: ioClient } = require('socket.io-client');
 const machineConfig = require('../utils/machine-id');
+const { FileTransferManager } = require('../transfer/file-transfer');
 
 const SERVER_URL = 'http://localhost:3000';
 
@@ -11,6 +13,9 @@ let inputController = null;
 let activeDisplayBounds = null;
 let userDataPath;
 let config;
+
+const transferManager = new FileTransferManager();
+const progressThrottles = new Map(); // transferId -> last send time
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -136,6 +141,115 @@ function connectSocket() {
   // Monitor switch request from client
   socket.on('monitor:switch-request', (data) => {
     mainWindow?.webContents.send('server:session-event', { type: 'monitor-switch-request', ...data });
+  });
+
+  // --- File transfer socket listeners ---
+  socket.on('transfer:request', (data) => {
+    const { transferId } = data;
+    transferManager.incoming.set(transferId, {
+      ...data,
+      status: 'pending',
+      bytesReceived: 0,
+      filesReceived: 0,
+      savePath: transferManager.getDownloadsPath(),
+      currentStream: null,
+      currentFile: null,
+    });
+    mainWindow?.webContents.send('server:session-event', { type: 'transfer-request', ...data });
+  });
+
+  socket.on('transfer:accepted', (data) => {
+    const { transferId } = data;
+    const outgoing = transferManager.outgoing.get(transferId);
+    if (outgoing) {
+      outgoing.status = 'sending';
+      mainWindow?.webContents.send('server:session-event', { type: 'transfer-accepted', transferId });
+      transferManager.startSending(transferId, socket, (progress) => {
+        const now = Date.now();
+        const lastSent = progressThrottles.get(transferId) || 0;
+        if (now - lastSent >= 100) {
+          progressThrottles.set(transferId, now);
+          mainWindow?.webContents.send('server:session-event', {
+            type: 'transfer-progress',
+            transferId,
+            bytesSent: progress.bytesSent,
+            totalSize: progress.totalSize,
+            currentFile: progress.currentFile,
+            direction: 'outgoing',
+          });
+        }
+      }).catch(err => {
+        console.error('[Main] Transfer send error:', err.message);
+        mainWindow?.webContents.send('server:session-event', {
+          type: 'transfer-error',
+          transferId,
+          message: err.message,
+        });
+      });
+    }
+  });
+
+  socket.on('transfer:denied', (data) => {
+    const { transferId } = data;
+    const outgoing = transferManager.outgoing.get(transferId);
+    if (outgoing) outgoing.status = 'cancelled';
+    mainWindow?.webContents.send('server:session-event', { type: 'transfer-denied', transferId });
+  });
+
+  socket.on('transfer:file-start', (data) => {
+    transferManager.handleFileStart(data.transferId, data);
+  });
+
+  socket.on('transfer:chunk', (data) => {
+    transferManager.handleChunk(data.transferId, data);
+    const transfer = transferManager.incoming.get(data.transferId);
+    if (transfer) {
+      const now = Date.now();
+      const lastSent = progressThrottles.get(data.transferId) || 0;
+      if (now - lastSent >= 100) {
+        progressThrottles.set(data.transferId, now);
+        mainWindow?.webContents.send('server:session-event', {
+          type: 'transfer-progress',
+          transferId: data.transferId,
+          bytesReceived: transfer.bytesReceived,
+          totalSize: transfer.totalSize,
+          currentFile: transfer.currentFile,
+          direction: 'incoming',
+        });
+      }
+    }
+  });
+
+  socket.on('transfer:file-end', (data) => {
+    transferManager.handleFileEnd(data.transferId, data);
+  });
+
+  socket.on('transfer:empty-dirs', (data) => {
+    transferManager.handleEmptyDirs(data.transferId, data);
+  });
+
+  socket.on('transfer:complete', (data) => {
+    transferManager.handleComplete(data.transferId);
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'transfer-complete',
+      transferId: data.transferId,
+    });
+  });
+
+  socket.on('transfer:cancel', (data) => {
+    transferManager.handleRemoteCancel(data.transferId);
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'transfer-cancelled',
+      transferId: data.transferId,
+    });
+  });
+
+  socket.on('transfer:error', (data) => {
+    mainWindow?.webContents.send('server:session-event', {
+      type: 'transfer-error',
+      transferId: data.transferId,
+      message: data.message,
+    });
   });
 
   // WebRTC relay forwarding
@@ -355,6 +469,66 @@ ipcMain.on('input:send-command', (_event, data) => {
 ipcMain.on('input:set-active-display', (_event, bounds) => {
   activeDisplayBounds = bounds;
   console.log('[Main] Active display bounds set:', bounds);
+});
+
+// --- File transfer IPC handlers ---
+ipcMain.handle('transfer:select-files', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+
+  const transfers = [];
+  for (const filePath of result.filePaths) {
+    const transferId = crypto.randomBytes(8).toString('hex');
+    const scanned = await transferManager.scanPath(filePath);
+    transferManager.outgoing.set(transferId, {
+      transferId,
+      ...scanned,
+      status: 'pending',
+      bytesSent: 0,
+    });
+    transfers.push({ transferId, ...scanned });
+  }
+  return transfers;
+});
+
+ipcMain.handle('transfer:select-folder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+
+  const transferId = crypto.randomBytes(8).toString('hex');
+  const scanned = await transferManager.scanPath(result.filePaths[0]);
+  transferManager.outgoing.set(transferId, {
+    transferId,
+    ...scanned,
+    status: 'pending',
+    bytesSent: 0,
+  });
+  return [{ transferId, ...scanned }];
+});
+
+ipcMain.on('transfer:send-request', (_event, data) => {
+  if (socket && socket.connected) {
+    socket.emit('transfer:request', data);
+  }
+});
+
+ipcMain.on('transfer:respond', (_event, data) => {
+  if (socket && socket.connected) {
+    const eventName = data.accepted ? 'transfer:accepted' : 'transfer:denied';
+    socket.emit(eventName, { transferId: data.transferId });
+  }
+});
+
+ipcMain.on('transfer:cancel', (_event, data) => {
+  transferManager.cancelTransfer(data.transferId, socket);
+});
+
+ipcMain.on('transfer:open-downloads', () => {
+  shell.openPath(transferManager.getDownloadsPath());
 });
 
 // Disconnect from server

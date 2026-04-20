@@ -146,10 +146,30 @@
 
       <!-- File Transfer Page -->
       <div class="page" id="page-transfer">
-        <div class="page-placeholder">
-          <svg viewBox="0 0 24 24" width="64" height="64"><path fill="#3b82f6" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM8 17l3-3-3-3 1.4-1.4L13.8 14l-4.4 4.4L8 17z"/></svg>
-          <h2>File Transfer</h2>
-          <p>Transfer files between connected machines. Connect to a session first.</p>
+        <div class="transfer-container">
+          <div class="transfer-header">
+            <h2 class="transfer-title">File Transfer</h2>
+            <div class="transfer-actions">
+              <button class="btn-transfer" id="btn-send-files" disabled>
+                <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM6 20V4h5v6h6v10H6z"/></svg>
+                Send Files
+              </button>
+              <button class="btn-transfer" id="btn-send-folder" disabled>
+                <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
+                Send Folder
+              </button>
+              <button class="btn-transfer" id="btn-open-downloads">
+                <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                Open Downloads
+              </button>
+            </div>
+          </div>
+          <div class="transfer-list" id="transfer-list">
+            <div class="transfer-empty" id="transfer-empty">
+              <svg viewBox="0 0 24 24" width="48" height="48"><path fill="var(--text-muted)" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM8 17l3-3-3-3 1.4-1.4L13.8 14l-4.4 4.4L8 17z"/></svg>
+              <p>No transfers yet. Send files to a connected peer.</p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -220,6 +240,27 @@
         <button class="btn btn-danger modal-btn" id="access-deny">Deny</button>
         <button class="btn btn-success modal-btn" id="access-accept">Accept</button>
         <button class="btn btn-primary modal-btn" id="access-trust">Accept & Trust</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transfer Accept/Deny Modal -->
+  <div class="modal-overlay" id="transfer-modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-icon">
+        <svg viewBox="0 0 24 24" width="40" height="40"><path fill="#3b82f6" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 2 5 5h-5V4zM8 17l3-3-3-3 1.4-1.4L13.8 14l-4.4 4.4L8 17z"/></svg>
+      </div>
+      <h3 class="modal-title">Incoming Transfer</h3>
+      <div class="transfer-req-details">
+        <p class="modal-info"><strong id="transfer-req-name">—</strong></p>
+        <p class="transfer-req-type" id="transfer-req-type"></p>
+        <p class="modal-desc" id="transfer-req-size"></p>
+        <p class="modal-desc" id="transfer-req-count"></p>
+      </div>
+      <p class="modal-desc">Save to Desktop/RemoteLink Downloads/</p>
+      <div class="modal-actions">
+        <button class="btn btn-danger modal-btn" id="transfer-deny">Deny</button>
+        <button class="btn btn-success modal-btn" id="transfer-accept">Accept</button>
       </div>
     </div>
   </div>

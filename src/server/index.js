@@ -36,6 +36,7 @@ function generateSessionId() {
 const server = http.createServer();
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  maxHttpBufferSize: 2e6, // 2MB to accommodate 512KB chunks + metadata
 });
 
 io.on('connection', (socket) => {
@@ -226,6 +227,19 @@ io.on('connection', (socket) => {
     if (session && session.hostSocketId) {
       io.to(session.hostSocketId).emit('input:command', data);
     }
+  });
+
+  // --- File transfer relay (bidirectional) ---
+  const transferEvents = [
+    'transfer:request', 'transfer:accepted', 'transfer:denied',
+    'transfer:file-start', 'transfer:chunk', 'transfer:file-end',
+    'transfer:empty-dirs', 'transfer:complete', 'transfer:cancel', 'transfer:error',
+  ];
+  transferEvents.forEach(ev => {
+    socket.on(ev, (data) => {
+      const sessionId = socketToSession.get(socket.id);
+      if (sessionId) socket.to(sessionId).emit(ev, data);
+    });
   });
 
   // --- Monitor switch relay (client → host only) ---
