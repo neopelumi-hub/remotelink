@@ -14,6 +14,12 @@ let controlActive = false;
 let lastMouseMoveTime = 0;
 const MOUSE_THROTTLE_MS = 16; // ~60fps cap
 
+// --- Connection mode state ---
+let connectionMode = 'session'; // 'session' or 'machine'
+let currentAccessRequest = null;
+let accessTimerInterval = null;
+let accessCountdown = 30;
+
 // --- DOM Elements ---
 const statusDot = document.querySelector('.status-dot');
 const statusLabel = document.querySelector('.sidebar-footer .sidebar-label');
@@ -47,6 +53,11 @@ sidebarButtons.forEach(btn => {
     btn.classList.add('active');
     pages.forEach(page => page.classList.remove('active'));
     document.getElementById(`page-${targetPage}`).classList.add('active');
+
+    // Load settings data when navigating to settings page
+    if (targetPage === 'settings') {
+      renderSettingsPage();
+    }
   });
 });
 
@@ -89,6 +100,48 @@ function showToast(message, type = 'info') {
     setTimeout(() => toast.remove(), 300);
   }, 4000);
 }
+
+// =============================================
+// Machine ID display
+// =============================================
+
+async function initMachineInfo() {
+  try {
+    const info = await window.electronAPI.getMachineInfo();
+    document.getElementById('machine-id-display').textContent = info.machineId;
+    document.getElementById('settings-machine-id').textContent = info.machineId;
+    document.getElementById('settings-machine-name').textContent = info.machineName;
+  } catch (err) {
+    console.error('[Renderer] Failed to get machine info:', err);
+  }
+}
+
+// =============================================
+// Connection Mode Toggle
+// =============================================
+
+const modeButtons = document.querySelectorAll('.mode-btn');
+modeButtons.forEach(btn => {
+  btn.addEventListener('click', () => {
+    const mode = btn.dataset.mode;
+    if (mode === connectionMode) return;
+
+    connectionMode = mode;
+    modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+
+    // Update input field
+    joinInput.value = '';
+    joinError.classList.remove('visible');
+
+    if (mode === 'machine') {
+      joinInput.placeholder = 'XXXX-XXXX-XXXX';
+      joinInput.maxLength = 14;
+    } else {
+      joinInput.placeholder = 'Enter session ID';
+      joinInput.maxLength = 6;
+    }
+  });
+});
 
 // --- Host Session ---
 hostBtn.addEventListener('click', async () => {
@@ -134,43 +187,83 @@ hostBtn.addEventListener('click', async () => {
 
 // --- Join Session ---
 joinBtn.addEventListener('click', async () => {
-  const sessionId = joinInput.value.trim().toUpperCase();
+  const inputValue = joinInput.value.trim().toUpperCase();
 
-  if (!sessionId) {
-    showError('Please enter a Session ID.');
+  if (!inputValue) {
+    showError(connectionMode === 'machine' ? 'Please enter a Machine ID.' : 'Please enter a Session ID.');
     return;
   }
 
-  if (sessionId.length < 6) {
-    showError('Session ID must be 6 characters.');
-    return;
+  if (connectionMode === 'session') {
+    // --- Session ID mode (existing flow) ---
+    if (inputValue.length < 6) {
+      showError('Session ID must be 6 characters.');
+      return;
+    }
+
+    joinError.classList.remove('visible');
+    joinBtn.disabled = true;
+    joinBtn.textContent = 'Connecting...';
+
+    const result = await window.electronAPI.joinSession(inputValue);
+
+    joinBtn.disabled = false;
+
+    if (result.error) {
+      joinBtn.textContent = 'Connect';
+      showError(result.error);
+      return;
+    }
+
+    isJoined = true;
+    joinBtn.textContent = 'Connected';
+    joinBtn.classList.remove('btn-success');
+    joinBtn.classList.add('btn-joined');
+    setStatus(true);
+    showToast('Connected to session ' + result.sessionId, 'success');
+  } else {
+    // --- Machine ID mode (access control flow) ---
+    const machineId = inputValue.replace(/[^A-Z0-9]/g, '');
+    if (machineId.length !== 12) {
+      showError('Enter a valid Machine ID (XXXX-XXXX-XXXX).');
+      return;
+    }
+
+    const formatted = `${machineId.slice(0, 4)}-${machineId.slice(4, 8)}-${machineId.slice(8, 12)}`;
+
+    joinError.classList.remove('visible');
+    joinBtn.disabled = true;
+    joinBtn.textContent = 'Requesting access...';
+
+    const result = await window.electronAPI.joinByMachineId(formatted);
+
+    if (result.error) {
+      joinBtn.disabled = false;
+      joinBtn.textContent = 'Connect';
+      showError(result.error);
+      return;
+    }
+
+    // Pending — waiting for host to accept/deny
+    // Button stays disabled with "Requesting access..." text
+    // Will be updated by access-granted or access-denied events
   }
-
-  joinError.classList.remove('visible');
-  joinBtn.disabled = true;
-  joinBtn.textContent = 'Connecting...';
-
-  const result = await window.electronAPI.joinSession(sessionId);
-
-  joinBtn.disabled = false;
-
-  if (result.error) {
-    joinBtn.textContent = 'Connect';
-    showError(result.error);
-    return;
-  }
-
-  isJoined = true;
-  joinBtn.textContent = 'Connected';
-  joinBtn.classList.remove('btn-success');
-  joinBtn.classList.add('btn-joined');
-  setStatus(true);
-  showToast('Connected to session ' + result.sessionId, 'success');
 });
 
-// Auto-uppercase input
+// Auto-format input based on connection mode
 joinInput.addEventListener('input', () => {
-  joinInput.value = joinInput.value.toUpperCase();
+  if (connectionMode === 'machine') {
+    // Auto-format: XXXX-XXXX-XXXX
+    let val = joinInput.value.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 12);
+    let formatted = '';
+    for (let i = 0; i < val.length; i++) {
+      if (i > 0 && i % 4 === 0) formatted += '-';
+      formatted += val[i];
+    }
+    joinInput.value = formatted;
+  } else {
+    joinInput.value = joinInput.value.toUpperCase();
+  }
   joinError.classList.remove('visible');
 });
 
@@ -469,6 +562,118 @@ document.addEventListener('keyup', (e) => {
 });
 
 // =============================================
+// Access Request Modal (Host side)
+// =============================================
+
+function showAccessModal(requestId, clientName, clientId) {
+  currentAccessRequest = { requestId, clientMachineId: clientId, clientMachineName: clientName };
+
+  document.getElementById('access-client-name').textContent = clientName;
+  document.getElementById('access-client-id').textContent = clientId;
+  document.getElementById('access-modal').style.display = '';
+
+  // Start countdown timer
+  accessCountdown = 30;
+  const timerBar = document.getElementById('timer-bar');
+  const timerText = document.getElementById('timer-text');
+  timerBar.style.width = '100%';
+  timerText.textContent = '30s';
+
+  if (accessTimerInterval) clearInterval(accessTimerInterval);
+  accessTimerInterval = setInterval(() => {
+    accessCountdown--;
+    timerBar.style.width = `${(accessCountdown / 30) * 100}%`;
+    timerText.textContent = `${accessCountdown}s`;
+    if (accessCountdown <= 0) {
+      clearInterval(accessTimerInterval);
+      accessTimerInterval = null;
+      hideAccessModal();
+    }
+  }, 1000);
+}
+
+function hideAccessModal() {
+  document.getElementById('access-modal').style.display = 'none';
+  if (accessTimerInterval) {
+    clearInterval(accessTimerInterval);
+    accessTimerInterval = null;
+  }
+  currentAccessRequest = null;
+}
+
+function respondToAccess(accepted, trusted) {
+  if (!currentAccessRequest) return;
+  window.electronAPI.respondToAccess({
+    requestId: currentAccessRequest.requestId,
+    accepted,
+    trusted: !!trusted,
+    clientMachineId: currentAccessRequest.clientMachineId,
+    clientMachineName: currentAccessRequest.clientMachineName,
+  });
+  hideAccessModal();
+
+  if (accepted) {
+    showToast(`Access granted to ${currentAccessRequest.clientMachineName}`, 'success');
+  } else {
+    showToast('Access denied', 'info');
+  }
+}
+
+// Access modal button handlers
+document.getElementById('access-deny').addEventListener('click', () => respondToAccess(false, false));
+document.getElementById('access-accept').addEventListener('click', () => respondToAccess(true, false));
+document.getElementById('access-trust').addEventListener('click', () => respondToAccess(true, true));
+
+// =============================================
+// Settings Page
+// =============================================
+
+async function renderSettingsPage() {
+  try {
+    const info = await window.electronAPI.getMachineInfo();
+    document.getElementById('settings-machine-id').textContent = info.machineId;
+    document.getElementById('settings-machine-name').textContent = info.machineName;
+
+    const result = await window.electronAPI.getTrustedMachines();
+    const trusted = result.trusted || {};
+    const entries = Object.entries(trusted);
+    const list = document.getElementById('trusted-machines-list');
+
+    if (entries.length === 0) {
+      list.innerHTML = '<div class="machines-empty">No trusted machines yet.</div>';
+      return;
+    }
+
+    list.innerHTML = '';
+    entries.forEach(([id, info]) => {
+      const item = document.createElement('div');
+      item.className = 'machine-item';
+      item.innerHTML = `
+        <div class="machine-info">
+          <span class="machine-name">${escapeHtml(info.name)}</span>
+          <span class="machine-id-small">${escapeHtml(id)}</span>
+        </div>
+        <button class="btn-remove">Remove</button>
+      `;
+      item.querySelector('.btn-remove').addEventListener('click', async () => {
+        await window.electronAPI.removeMachine(id);
+        renderSettingsPage();
+        showToast(`Removed ${info.name} from trusted list`, 'info');
+      });
+      list.appendChild(item);
+    });
+  } catch (err) {
+    console.error('[Renderer] Failed to render settings:', err);
+  }
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// =============================================
 // WebRTC Initialization
 // =============================================
 
@@ -587,11 +792,51 @@ window.electronAPI.onSessionEvent((event) => {
       }
       break;
 
+    // --- Access control events ---
+    case 'access-request':
+      if (isHosting) {
+        showAccessModal(event.requestId, event.clientMachineName, event.clientMachineId);
+      }
+      break;
+
+    case 'access-auto-accepted':
+      if (isHosting) {
+        showToast(`Trusted machine "${event.clientMachineName}" auto-connected`, 'success');
+      }
+      break;
+
+    case 'access-granted':
+      // Client: access was granted, now treated as joined
+      isJoined = true;
+      joinBtn.disabled = false;
+      joinBtn.textContent = 'Connected';
+      joinBtn.classList.remove('btn-success');
+      joinBtn.classList.add('btn-joined');
+      setStatus(true);
+      showToast('Access granted — connected!', 'success');
+      break;
+
+    case 'access-denied':
+      joinBtn.disabled = false;
+      joinBtn.textContent = 'Connect';
+      showError(event.reason || 'Access denied by host.');
+      showToast(event.reason || 'Access denied', 'error');
+      break;
+
+    case 'access-timeout':
+      if (isHosting) {
+        hideAccessModal();
+        showToast('Access request timed out', 'info');
+      }
+      break;
+
+    // --- Disconnection events ---
     case 'host-disconnected':
       cleanupWebRTC();
       hideViewer();
       isJoined = false;
       joinBtn.textContent = 'Connect';
+      joinBtn.disabled = false;
       joinBtn.classList.remove('btn-joined');
       joinBtn.classList.add('btn-success');
       setStatus(false);
@@ -606,6 +851,7 @@ window.electronAPI.onSessionEvent((event) => {
 
     case 'disconnected':
       cleanupWebRTC();
+      hideAccessModal();
       if (isHosting) {
         hideMonitorPanel();
         isHosting = false;
@@ -618,6 +864,7 @@ window.electronAPI.onSessionEvent((event) => {
         hideViewer();
         isJoined = false;
         joinBtn.textContent = 'Connect';
+        joinBtn.disabled = false;
         joinBtn.classList.remove('btn-joined');
         joinBtn.classList.add('btn-success');
       }
@@ -629,3 +876,8 @@ window.electronAPI.onSessionEvent((event) => {
       break;
   }
 });
+
+// =============================================
+// Initialize
+// =============================================
+initMachineInfo();

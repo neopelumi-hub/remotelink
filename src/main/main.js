@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, screen } = require('electron');
 const path = require('path');
 const { io: ioClient } = require('socket.io-client');
+const machineConfig = require('../utils/machine-id');
 
 const SERVER_URL = 'http://localhost:3000';
 
@@ -8,6 +9,8 @@ let mainWindow;
 let socket = null;
 let inputController = null;
 let activeDisplayBounds = null;
+let userDataPath;
+let config;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -32,7 +35,12 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  userDataPath = app.getPath('userData');
+  config = machineConfig.getOrCreateConfig(userDataPath);
+  console.log('[Main] Machine ID:', config.machineId);
+  createWindow();
+});
 
 app.on('window-all-closed', () => {
   if (socket) {
@@ -79,6 +87,13 @@ function connectSocket() {
 
   socket.on('connect', () => {
     mainWindow?.webContents.send('server:session-event', { type: 'connected' });
+    // Register this machine with the server
+    if (config) {
+      socket.emit('register-machine', {
+        machineId: config.machineId,
+        machineName: config.machineName,
+      });
+    }
   });
 
   socket.on('disconnect', () => {
@@ -136,8 +151,50 @@ function connectSocket() {
     mainWindow?.webContents.send('server:session-event', { type: 'webrtc-ice-candidate', ...data });
   });
 
+  // --- Access control events ---
+  socket.on('access:request', (data) => {
+    const { requestId, clientMachineId, clientMachineName } = data;
+    // Check if client is in trusted list — auto-accept
+    if (machineConfig.isTrusted(userDataPath, clientMachineId)) {
+      socket.emit('access:response', { requestId, accepted: true, trusted: true });
+      machineConfig.addConnectedMachine(userDataPath, clientMachineId, clientMachineName);
+      mainWindow?.webContents.send('server:session-event', {
+        type: 'access-auto-accepted',
+        clientMachineName,
+        clientMachineId,
+      });
+      console.log(`[Main] Auto-accepted trusted machine ${clientMachineId}`);
+    } else {
+      // Forward to renderer for user decision
+      mainWindow?.webContents.send('server:session-event', {
+        type: 'access-request',
+        requestId,
+        clientMachineId,
+        clientMachineName,
+      });
+    }
+  });
+
+  socket.on('access:granted', (data) => {
+    mainWindow?.webContents.send('server:session-event', { type: 'access-granted', ...data });
+  });
+
+  socket.on('access:denied', (data) => {
+    mainWindow?.webContents.send('server:session-event', { type: 'access-denied', ...data });
+  });
+
+  socket.on('access:timeout', (data) => {
+    mainWindow?.webContents.send('server:session-event', { type: 'access-timeout', ...data });
+  });
+
   return socket;
 }
+
+// --- Machine info ---
+ipcMain.handle('machine:get-info', () => ({
+  machineId: config.machineId,
+  machineName: config.machineName,
+}));
 
 // Host: create a session
 ipcMain.handle('server:start-hosting', async () => {
@@ -168,7 +225,7 @@ ipcMain.handle('server:start-hosting', async () => {
   }
 });
 
-// Client: join a session
+// Client: join a session (by Session ID)
 ipcMain.handle('server:join-session', async (_event, sessionId) => {
   try {
     const sock = connectSocket();
@@ -189,6 +246,66 @@ ipcMain.handle('server:join-session', async (_event, sessionId) => {
   } catch (err) {
     return { error: err.message };
   }
+});
+
+// Client: join by Machine ID (access control flow)
+ipcMain.handle('machine:join-by-id', async (_event, targetMachineId) => {
+  try {
+    const sock = connectSocket();
+
+    if (!sock.connected) {
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Connection timeout')), 5000);
+        sock.once('connect', () => { clearTimeout(timeout); resolve(); });
+        sock.once('connect_error', () => { clearTimeout(timeout); reject(new Error('Cannot reach server')); });
+      });
+    }
+
+    return new Promise((resolve) => {
+      sock.emit('client:join-machine', {
+        targetMachineId,
+        clientMachineId: config.machineId,
+        clientMachineName: config.machineName,
+      }, (response) => {
+        resolve(response);
+      });
+    });
+  } catch (err) {
+    return { error: err.message };
+  }
+});
+
+// Host: respond to access request
+ipcMain.on('access:respond', (_event, data) => {
+  const { requestId, accepted, trusted, clientMachineId, clientMachineName } = data;
+  if (socket && socket.connected) {
+    socket.emit('access:response', { requestId, accepted, trusted });
+  }
+  if (accepted) {
+    machineConfig.addConnectedMachine(userDataPath, clientMachineId, clientMachineName);
+    if (trusted) {
+      machineConfig.setTrusted(userDataPath, clientMachineId, clientMachineName, true);
+    }
+  }
+});
+
+// Trusted machines management
+ipcMain.handle('machine:get-trusted', () => {
+  const cfg = machineConfig.loadConfig(userDataPath) || config;
+  return {
+    trusted: cfg.trustedMachines || {},
+    connected: cfg.connectedMachines || {},
+  };
+});
+
+ipcMain.handle('machine:set-trusted', (_event, machineId, name, trusted) => {
+  machineConfig.setTrusted(userDataPath, machineId, name, trusted);
+  return { success: true };
+});
+
+ipcMain.handle('machine:remove', (_event, machineId) => {
+  machineConfig.removeMachine(userDataPath, machineId);
+  return { success: true };
 });
 
 // Screen capture: enumerate available screens (includes display bounds for input mapping)

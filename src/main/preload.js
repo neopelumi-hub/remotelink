@@ -11,6 +11,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   joinSession: (sessionId) => ipcRenderer.invoke('server:join-session', sessionId),
   disconnectSession: () => ipcRenderer.send('server:disconnect'),
 
+  // Machine ID & access control
+  getMachineInfo: () => ipcRenderer.invoke('machine:get-info'),
+  joinByMachineId: (targetMachineId) => ipcRenderer.invoke('machine:join-by-id', targetMachineId),
+  respondToAccess: (data) => ipcRenderer.send('access:respond', data),
+  getTrustedMachines: () => ipcRenderer.invoke('machine:get-trusted'),
+  setMachineTrusted: (machineId, name, trusted) => ipcRenderer.invoke('machine:set-trusted', machineId, name, trusted),
+  removeMachine: (machineId) => ipcRenderer.invoke('machine:remove', machineId),
+
   // Screen capture
   getScreenSources: () => ipcRenderer.invoke('screen:get-sources'),
 
