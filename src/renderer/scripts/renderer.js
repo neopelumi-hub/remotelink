@@ -812,10 +812,16 @@ if (window.electronAPI.onUpdateReady) {
     const banner = document.getElementById('update-banner');
     if (banner) {
       const text = banner.querySelector('.update-banner-text');
-      if (text) text.textContent = `Update v${version} installed — restart to apply`;
+      if (text) text.textContent = `Update v${version} ready — click to install`;
       banner.hidden = false;
+      banner.onclick = () => {
+        if (window.electronAPI.quitAndInstallUpdate) {
+          showToast(`Installing v${version}…`, 'info');
+          window.electronAPI.quitAndInstallUpdate();
+        }
+      };
     }
-    showToast(`Update v${version} installed — restart to apply`, 'success');
+    showToast(`Update v${version} ready — click the banner to install`, 'success');
   });
 }
 

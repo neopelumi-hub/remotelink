@@ -115,40 +115,83 @@ app.whenReady().then(() => {
 });
 
 // --- Auto-updater ---
+let updateDownloadedInfo = null;
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // re-check every 30 minutes
+
 function setupAutoUpdater() {
+  // Route electron-updater's internal logs to our console with a [updater] prefix
+  // so we can see exactly what happens (feed URL, http status, version compare, etc.)
+  autoUpdater.logger = {
+    info: (...args) => console.log('[updater]', ...args),
+    warn: (...args) => console.warn('[updater]', ...args),
+    error: (...args) => console.error('[updater]', ...args),
+    debug: (...args) => console.log('[updater:debug]', ...args),
+  };
+
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowDowngrade = false;
+  autoUpdater.allowPrerelease = false;
+
+  console.log(`[updater] current version: v${app.getVersion()}`);
+  console.log(`[updater] feed URL base: https://github.com/neopelumi-hub/remotelink/releases/latest`);
 
   autoUpdater.on('checking-for-update', () => {
     console.log('[updater] checking for update...');
   });
 
   autoUpdater.on('update-available', (info) => {
-    console.log(`[updater] update available: v${info?.version}`);
+    console.log(`[updater] ✅ update available: v${info?.version} (releaseDate=${info?.releaseDate})`);
   });
 
-  autoUpdater.on('update-not-available', () => {
-    console.log('[updater] already on latest version');
+  autoUpdater.on('update-not-available', (info) => {
+    console.log(`[updater] already on latest (server reports v${info?.version})`);
   });
 
   autoUpdater.on('download-progress', (p) => {
-    console.log(`[updater] downloading ${Math.round(p.percent)}% (${Math.round(p.bytesPerSecond / 1024)} KB/s)`);
+    console.log(`[updater] downloading ${Math.round(p.percent)}% — ${Math.round(p.transferred / 1024)} / ${Math.round(p.total / 1024)} KB @ ${Math.round(p.bytesPerSecond / 1024)} KB/s`);
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    console.log(`[updater] update v${info?.version} downloaded — will install on quit`);
+    updateDownloadedInfo = info;
+    console.log(`[updater] 📦 update v${info?.version} downloaded to ${info?.downloadedFile || 'cache'} — ready to install`);
     mainWindow?.webContents.send('updater:update-ready', { version: info?.version });
   });
 
   autoUpdater.on('error', (err) => {
-    console.log(`[updater] error: ${err?.message || err}`);
+    console.error('[updater] ⚠️ error:', err?.stack || err?.message || err);
   });
 
-  // checkForUpdates is a no-op in dev (unpacked) builds — electron-updater handles that internally
-  autoUpdater.checkForUpdates().catch((err) => {
-    console.log(`[updater] check failed: ${err?.message || err}`);
-  });
+  const runCheck = () => {
+    console.log('[updater] calling checkForUpdatesAndNotify()');
+    autoUpdater.checkForUpdatesAndNotify().then((result) => {
+      if (result?.updateInfo) {
+        console.log(`[updater] check returned updateInfo v${result.updateInfo.version}`);
+      } else {
+        console.log('[updater] check returned no updateInfo (either up to date or dev mode)');
+      }
+    }).catch((err) => {
+      console.error(`[updater] check failed: ${err?.message || err}`);
+    });
+  };
+
+  runCheck();
+  setInterval(runCheck, UPDATE_CHECK_INTERVAL_MS);
 }
+
+// Renderer can trigger an immediate install (quits the app and runs the installer).
+// This is the robust path for tray-resident apps that may never otherwise quit.
+ipcMain.on('updater:quit-and-install', () => {
+  if (!updateDownloadedInfo) {
+    console.log('[updater] quit-and-install requested but no update is downloaded');
+    return;
+  }
+  console.log(`[updater] user confirmed install — calling quitAndInstall for v${updateDownloadedInfo.version}`);
+  isQuitting = true;
+  // isSilent=false so the user sees the install progress / UAC prompt;
+  // isForceRunAfter=true so the new version launches automatically after install
+  autoUpdater.quitAndInstall(false, true);
+});
 
 app.on('window-all-closed', () => {
   // Don't quit — app lives in tray

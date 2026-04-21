@@ -1,6 +1,6 @@
 {
   "name": "remotelink",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "RemoteLink - Remote Desktop Application for Windows",
   "main": "src/main/main.js",
   "scripts": {
@@ -40,7 +40,8 @@
       "allowToChangeInstallationDirectory": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico"
+      "installerHeaderIcon": "assets/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
     },
     "publish": [
       {
