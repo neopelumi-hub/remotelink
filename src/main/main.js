@@ -137,17 +137,19 @@ function connectSocket() {
   // server to see a register-then-unregister cycle.
   if (socket) return socket;
 
-  socket = ioClient(SERVER_URL, {
-    transports: ['polling', 'websocket'],
+  const opts = {
+    transports: ['polling'],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 5000,
     reconnectionDelayMax: 10000,
     timeout: 60000,
-  });
+  };
+  console.log(`[socket] connecting to ${SERVER_URL} with options:`, JSON.stringify(opts));
+  socket = ioClient(SERVER_URL, opts);
 
   socket.on('connect', () => {
-    console.log(`[socket] connected to ${SERVER_URL} (id=${socket.id})`);
+    console.log(`[socket] ✅ connected to ${SERVER_URL} (id=${socket.id}, transport=${socket.io?.engine?.transport?.name})`);
     mainWindow?.webContents.send('server:session-event', { type: 'connected' });
     // Register this machine with the server
     if (config) {
@@ -184,24 +186,38 @@ function connectSocket() {
     updateTrayMenu();
   });
 
-  socket.on('disconnect', (reason) => {
-    console.log(`[socket] disconnected (reason=${reason})`);
+  socket.on('disconnect', (reason, details) => {
+    console.log(`[socket] ❌ disconnected (reason=${reason})`, details || '');
     mainWindow?.webContents.send('server:session-event', { type: 'disconnected' });
     mainWindow?.webContents.send('server:session-event', { type: 'reconnecting' });
     updateTrayMenu();
   });
 
   socket.on('reconnect_attempt', (attempt) => {
+    console.log(`[socket] 🔄 reconnect attempt #${attempt}`);
     mainWindow?.webContents.send('server:session-event', {
       type: 'reconnecting',
       attempt,
     });
   });
 
-  socket.on('connect_error', () => {
+  socket.on('reconnect_error', (err) => {
+    console.log(`[socket] reconnect_error: ${err?.message || err}`);
+  });
+
+  socket.on('reconnect_failed', () => {
+    console.log('[socket] reconnect_failed — giving up on this cycle');
+  });
+
+  socket.on('connect_error', (err) => {
+    console.log(`[socket] ⚠️ connect_error: ${err?.message || err}`, {
+      description: err?.description,
+      context: err?.context,
+      type: err?.type,
+    });
     mainWindow?.webContents.send('server:session-event', {
       type: 'error',
-      message: 'Cannot reach the signaling server. Make sure it is running.',
+      message: `Cannot reach the signaling server: ${err?.message || 'unknown error'}`,
     });
   });
 
