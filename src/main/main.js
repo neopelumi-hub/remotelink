@@ -96,11 +96,11 @@ app.whenReady().then(() => {
   const settings = machineConfig.getSettings(userDataPath);
   applyAutoStart(settings.startWithWindows);
 
-  // Auto-connect socket if user has a console role (master or node)
-  const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
-  if (consoleConfig.role) {
-    connectSocket();
-  }
+  // Auto-connect to the signaling server on startup so the machine is
+  // registered and reachable immediately — no user action required.
+  // The 'connect' handler in connectSocket() emits register-machine and,
+  // if the user has a console role, re-registers that role too.
+  connectSocket();
 
   // Check for updates silently in the background
   setupAutoUpdater();
