@@ -71,4 +71,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSessionEvent: (callback) => {
     ipcRenderer.on('server:session-event', (_event, data) => callback(data));
   },
+
+  // Auto-updater — fired when a new version has been downloaded in the background
+  onUpdateReady: (callback) => {
+    ipcRenderer.on('updater:update-ready', (_event, data) => callback(data));
+  },
 });

@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const { execSync } = require('child_process');
 const { io: ioClient } = require('socket.io-client');
+const { autoUpdater } = require('electron-updater');
 const machineConfig = require('../utils/machine-id');
 const { FileTransferManager } = require('../transfer/file-transfer');
 const { ChatManager } = require('../chat/index');
@@ -100,7 +101,46 @@ app.whenReady().then(() => {
   if (consoleConfig.role) {
     connectSocket();
   }
+
+  // Check for updates silently in the background
+  setupAutoUpdater();
 });
+
+// --- Auto-updater ---
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[updater] checking for update...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    console.log(`[updater] update available: v${info?.version}`);
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[updater] already on latest version');
+  });
+
+  autoUpdater.on('download-progress', (p) => {
+    console.log(`[updater] downloading ${Math.round(p.percent)}% (${Math.round(p.bytesPerSecond / 1024)} KB/s)`);
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log(`[updater] update v${info?.version} downloaded — will install on quit`);
+    mainWindow?.webContents.send('updater:update-ready', { version: info?.version });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.log(`[updater] error: ${err?.message || err}`);
+  });
+
+  // checkForUpdates is a no-op in dev (unpacked) builds — electron-updater handles that internally
+  autoUpdater.checkForUpdates().catch((err) => {
+    console.log(`[updater] check failed: ${err?.message || err}`);
+  });
+}
 
 app.on('window-all-closed', () => {
   // Don't quit — app lives in tray

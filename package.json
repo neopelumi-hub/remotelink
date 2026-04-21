@@ -41,9 +41,17 @@
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "neopelumi-hub",
+        "repo": "remotelink"
+      }
+    ]
   },
   "dependencies": {
+    "electron-updater": "^6.8.3",
     "koffi": "^2.16.1",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
