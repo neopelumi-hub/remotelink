@@ -643,6 +643,39 @@ function connectSocket() {
     mainWindow?.webContents.send('server:session-event', { type: 'console-connect-error', error: data.error });
   });
 
+  // Master Console is initiating a connection and wants us to start hosting automatically.
+  socket.on('console:auto-host-request', (data) => {
+    const consoleConfig = machineConfig.getConsoleConfig(userDataPath);
+    // Defense-in-depth: only honor the request if we're a registered node of this master.
+    if (consoleConfig.role !== 'node' || consoleConfig.console.masterKey !== data.masterKey) {
+      console.log('[Main] Ignoring auto-host-request — not a registered node of this master');
+      return;
+    }
+    if (wasHosting && lastSessionId) {
+      // Already hosting — shouldn't reach this path, but be defensive
+      console.log('[Main] auto-host-request received but already hosting, ignoring');
+      return;
+    }
+    console.log(`[Main] Master ${data.masterMachineName} (${data.masterMachineId}) is initiating a connection — auto-starting hosting`);
+    socket.emit('host:create-session', (response) => {
+      if (response && response.sessionId) {
+        wasHosting = true;
+        lastSessionId = response.sessionId;
+        // Mark the master as trusted for this one connection so the access flow
+        // (which won't fire, since the server auto-grants) would accept anyway.
+        machineConfig.addConnectedMachine(userDataPath, data.masterMachineId, data.masterMachineName);
+        mainWindow?.webContents.send('server:session-event', {
+          type: 'hosting-started',
+          sessionId: response.sessionId,
+        });
+        updateTrayMenu();
+        console.log(`[Main] Auto-hosting session ${response.sessionId} for master`);
+      } else {
+        console.error('[Main] Auto-host failed — no sessionId returned');
+      }
+    });
+  });
+
   return socket;
 }
 

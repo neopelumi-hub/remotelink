@@ -23,6 +23,9 @@ const machineRegistry = new Map();
 const socketToMachine = new Map();
 // Pending access requests: requestId -> { clientSocketId, hostSocketId, sessionId, clientMachineId, clientMachineName, timer }
 const pendingRequests = new Map();
+// Master-initiated connections waiting for the node to start hosting
+// hostSocketId -> { masterSocketId, masterKey, targetMachineId, timer }
+const pendingMasterConnections = new Map();
 
 // --- Console Registry Persistence ---
 const REGISTRY_PATH = path.join(__dirname, 'console-registry.json');
@@ -123,6 +126,17 @@ io.on('connection', (socket) => {
     console.log(`[host] session ${sessionId} created by ${socket.id}`);
     if (typeof callback === 'function') {
       callback({ sessionId });
+    }
+
+    // If a Master Console was waiting for this node to start hosting,
+    // complete the connection now that a session exists.
+    const pending = pendingMasterConnections.get(socket.id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pendingMasterConnections.delete(socket.id);
+      const masterMachineId = socketToMachine.get(pending.masterSocketId);
+      const masterInfo = machineRegistry.get(masterMachineId);
+      completeMasterAutoConnect(pending.masterSocketId, socket.id, sessionId, masterMachineId, masterInfo);
     }
   });
 
@@ -450,49 +464,81 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Trigger the standard join-machine flow from master to node
+    // Security: verify this master is registered for this node
+    const registry = loadConsoleRegistry();
+    const entry = registry[masterKey];
+    if (!entry || !entry.nodes || !entry.nodes[targetMachineId]) {
+      socket.emit('console:connect-error', { error: 'Node is not registered to this master.' });
+      return;
+    }
+
     const hostSocketId = targetInfo.socketId;
     const sessionId = socketToSession.get(hostSocketId);
 
-    if (!sessionId) {
-      socket.emit('console:connect-error', { error: 'Node is not hosting a session.' });
-      return;
-    }
-
-    const session = sessions.get(sessionId);
-    if (session && session.clientSocketId) {
-      socket.emit('console:connect-error', { error: 'Node already has a connected client.' });
-      return;
-    }
-
-    // Create access request like client:join-machine
-    const requestId = crypto.randomBytes(16).toString('hex');
-    const timer = setTimeout(() => {
-      const req = pendingRequests.get(requestId);
-      if (req) {
-        pendingRequests.delete(requestId);
-        io.to(req.clientSocketId).emit('access:denied', { reason: 'Request timed out.' });
-        io.to(req.hostSocketId).emit('access:timeout', { requestId });
+    // Node is already hosting → auto-accept the master immediately (no dialog)
+    if (sessionId) {
+      const session = sessions.get(sessionId);
+      if (session && session.clientSocketId) {
+        socket.emit('console:connect-error', { error: 'Node already has a connected client.' });
+        return;
       }
+      completeMasterAutoConnect(socket.id, hostSocketId, sessionId, masterMachineId, masterInfo);
+      return;
+    }
+
+    // Node is registered but not hosting → tell it to auto-host, then complete
+    // the connection when host:create-session arrives back.
+    if (pendingMasterConnections.has(hostSocketId)) {
+      // Another master request is already in flight for this node
+      socket.emit('console:connect-error', { error: 'Another connection is already in progress for this node.' });
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      pendingMasterConnections.delete(hostSocketId);
+      io.to(socket.id).emit('console:connect-error', { error: 'Node did not start hosting in time.' });
     }, ACCESS_TIMEOUT_MS);
 
-    pendingRequests.set(requestId, {
-      clientSocketId: socket.id,
-      hostSocketId,
-      sessionId,
-      clientMachineId: masterMachineId,
-      clientMachineName: masterInfo?.machineName || 'Master Console',
+    pendingMasterConnections.set(hostSocketId, {
+      masterSocketId: socket.id,
+      masterKey,
+      targetMachineId,
       timer,
     });
 
-    io.to(hostSocketId).emit('access:request', {
-      requestId,
+    io.to(hostSocketId).emit('console:auto-host-request', {
+      masterKey,
+      masterMachineId,
+      masterMachineName: masterInfo?.machineName || 'Master Console',
+    });
+
+    console.log(`[console] master ${masterMachineId} requesting auto-host on node ${targetMachineId}`);
+  });
+
+  function completeMasterAutoConnect(masterSocketId, hostSocketId, sessionId, masterMachineId, masterInfo) {
+    const session = sessions.get(sessionId);
+    if (!session) {
+      io.to(masterSocketId).emit('console:connect-error', { error: 'Session no longer exists.' });
+      return;
+    }
+    if (session.clientSocketId) {
+      io.to(masterSocketId).emit('console:connect-error', { error: 'Node already has a connected client.' });
+      return;
+    }
+
+    session.clientSocketId = masterSocketId;
+    socketToSession.set(masterSocketId, sessionId);
+    const masterSocket = io.sockets.sockets.get(masterSocketId);
+    masterSocket?.join(sessionId);
+
+    io.to(masterSocketId).emit('access:granted', { sessionId, trusted: true });
+    io.to(hostSocketId).emit('host:client-joined', {
+      sessionId,
       clientMachineId: masterMachineId,
       clientMachineName: masterInfo?.machineName || 'Master Console',
     });
-
-    console.log(`[console] quick-connect from master to node ${targetMachineId}`);
-  });
+    console.log(`[console] master auto-connected to node session ${sessionId}`);
+  }
 
   socket.on('console:send-notification', (data) => {
     const { masterKey, targetMachineId, message } = data;
@@ -548,6 +594,17 @@ io.on('connection', (socket) => {
         }
         if (req.hostSocketId === socket.id && req.clientSocketId !== socket.id) {
           io.to(req.clientSocketId).emit('access:denied', { reason: 'Host disconnected.' });
+        }
+      }
+    }
+
+    // Clean up pending master auto-connections involving this socket
+    for (const [hostSocketId, pending] of pendingMasterConnections) {
+      if (pending.masterSocketId === socket.id || hostSocketId === socket.id) {
+        clearTimeout(pending.timer);
+        pendingMasterConnections.delete(hostSocketId);
+        if (hostSocketId === socket.id && pending.masterSocketId !== socket.id) {
+          io.to(pending.masterSocketId).emit('console:connect-error', { error: 'Node disconnected before hosting could start.' });
         }
       }
     }
