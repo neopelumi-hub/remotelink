@@ -67,9 +67,18 @@ function generateSessionId() {
   return id;
 }
 
-const server = http.createServer();
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('RemoteLink server is running');
+    return;
+  }
+  res.writeHead(404, { 'Content-Type': 'text/plain' });
+  res.end('Not found');
+});
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] },
+  allowEIO3: true,
   maxHttpBufferSize: 2e6, // 2MB to accommodate 512KB chunks + metadata
 });
 
