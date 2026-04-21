@@ -132,18 +132,22 @@ ipcMain.on('window-close', () => {
 // --- Signaling server connection ---
 
 function connectSocket() {
-  if (socket && socket.connected) return socket;
+  // Reuse the existing socket if one already exists — even if it's mid-reconnect.
+  // Creating a new socket here would orphan the previous one and cause the
+  // server to see a register-then-unregister cycle.
+  if (socket) return socket;
 
   socket = ioClient(SERVER_URL, {
-    transports: ['websocket', 'polling'],
+    transports: ['polling', 'websocket'],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 5000,
-    timeout: 20000,
-    forceNew: true,
+    reconnectionDelayMax: 10000,
+    timeout: 60000,
   });
 
   socket.on('connect', () => {
+    console.log(`[socket] connected to ${SERVER_URL} (id=${socket.id})`);
     mainWindow?.webContents.send('server:session-event', { type: 'connected' });
     // Register this machine with the server
     if (config) {
@@ -180,7 +184,8 @@ function connectSocket() {
     updateTrayMenu();
   });
 
-  socket.on('disconnect', () => {
+  socket.on('disconnect', (reason) => {
+    console.log(`[socket] disconnected (reason=${reason})`);
     mainWindow?.webContents.send('server:session-event', { type: 'disconnected' });
     mainWindow?.webContents.send('server:session-event', { type: 'reconnecting' });
     updateTrayMenu();
