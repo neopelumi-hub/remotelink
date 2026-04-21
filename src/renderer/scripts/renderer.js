@@ -805,27 +805,6 @@ function cleanupWebRTC() {
 }
 
 // =============================================
-// Auto-updater events
-// =============================================
-if (window.electronAPI.onUpdateReady) {
-  window.electronAPI.onUpdateReady(({ version }) => {
-    const banner = document.getElementById('update-banner');
-    if (banner) {
-      const text = banner.querySelector('.update-banner-text');
-      if (text) text.textContent = `Update v${version} ready — click to install`;
-      banner.hidden = false;
-      banner.onclick = () => {
-        if (window.electronAPI.quitAndInstallUpdate) {
-          showToast(`Installing v${version}…`, 'info');
-          window.electronAPI.quitAndInstallUpdate();
-        }
-      };
-    }
-    showToast(`Update v${version} ready — click the banner to install`, 'success');
-  });
-}
-
-// =============================================
 // Server events
 // =============================================
 window.electronAPI.onSessionEvent((event) => {
