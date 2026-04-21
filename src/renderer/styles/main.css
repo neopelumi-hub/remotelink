@@ -299,6 +299,17 @@ body {
   margin-top: 6px;
 }
 
+.home-version {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 2px;
+  letter-spacing: 0.3px;
+}
+
+.home-version:empty {
+  display: none;
+}
+
 /* Machine ID Bar */
 .machine-id-bar {
   margin-top: 16px;

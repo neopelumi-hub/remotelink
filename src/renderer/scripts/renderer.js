@@ -157,6 +157,20 @@ async function initMachineInfo() {
   }
 }
 
+async function initAppVersion() {
+  try {
+    const version = await window.electronAPI.getAppVersion();
+    const homeEl = document.getElementById('home-version');
+    if (homeEl) homeEl.textContent = `v${version}`;
+    const aboutEl = document.getElementById('about-version');
+    if (aboutEl) aboutEl.textContent = `v${version}`;
+  } catch (err) {
+    console.error('[Renderer] Failed to get app version:', err);
+  }
+}
+
+initAppVersion();
+
 // =============================================
 // Connection Mode Toggle
 // =============================================
@@ -200,7 +214,7 @@ hostBtn.addEventListener('click', async () => {
     hostBtn.textContent = 'Start Hosting';
     hostBtn.classList.remove('btn-danger');
     hostBtn.classList.add('btn-primary');
-    setStatus(false);
+    // Socket stays connected — do not flip status to Offline here.
     showToast('Hosting stopped', 'info');
     return;
   }
@@ -1108,7 +1122,7 @@ window.electronAPI.onSessionEvent((event) => {
       break;
 
     case 'hosting-stopped':
-      // Hosting stopped from tray
+      // Hosting stopped from tray — socket stays connected, status stays Online
       if (webrtcManager) {
         webrtcManager.destroy();
         webrtcManager = null;
@@ -1120,7 +1134,6 @@ window.electronAPI.onSessionEvent((event) => {
       hostBtn.textContent = 'Start Hosting';
       hostBtn.classList.remove('btn-danger');
       hostBtn.classList.add('btn-primary');
-      setStatus(false);
       setTransferButtonsEnabled(false);
       showToast('Hosting stopped from tray', 'info');
       break;

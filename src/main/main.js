@@ -61,6 +61,14 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
+  // If the socket already connected before the renderer's listener was ready,
+  // re-send the current status once the page finishes loading.
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (socket && socket.connected) {
+      mainWindow?.webContents.send('server:session-event', { type: 'connected' });
+    }
+  });
+
   mainWindow.once('ready-to-show', () => {
     const settings = machineConfig.getSettings(userDataPath);
     const launchedSilent = process.argv.includes('--silent');
@@ -701,6 +709,8 @@ ipcMain.handle('machine:get-info', () => ({
   machineName: config.machineName,
 }));
 
+ipcMain.handle('app:get-version', () => app.getVersion());
+
 // Host: create a session
 ipcMain.handle('server:start-hosting', async () => {
   try {
@@ -955,13 +965,13 @@ ipcMain.on('chat:clear', () => {
   chatManager.clear();
 });
 
-// Disconnect from server
+// Stop hosting — ends the session server-side but keeps the socket alive
+// so the machine stays registered and the status dot stays green.
 ipcMain.on('server:disconnect', () => {
   wasHosting = false;
   lastSessionId = null;
-  if (socket) {
-    socket.disconnect();
-    socket = null;
+  if (socket && socket.connected) {
+    socket.emit('host:end-session');
   }
   updateTrayMenu();
 });
@@ -1101,9 +1111,8 @@ function updateTrayMenu() {
         if (wasHosting) {
           wasHosting = false;
           lastSessionId = null;
-          if (socket) {
-            socket.disconnect();
-            socket = null;
+          if (socket && socket.connected) {
+            socket.emit('host:end-session');
           }
           mainWindow?.webContents.send('server:session-event', { type: 'hosting-stopped' });
           updateTrayMenu();

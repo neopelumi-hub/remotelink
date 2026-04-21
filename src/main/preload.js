@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   joinSession: (sessionId) => ipcRenderer.invoke('server:join-session', sessionId),
   disconnectSession: () => ipcRenderer.send('server:disconnect'),
 
+  // App info
+  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+
   // Machine ID & access control
   getMachineInfo: () => ipcRenderer.invoke('machine:get-info'),
   joinByMachineId: (targetMachineId) => ipcRenderer.invoke('machine:join-by-id', targetMachineId),

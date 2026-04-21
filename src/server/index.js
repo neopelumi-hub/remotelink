@@ -277,6 +277,26 @@ io.on('connection', (socket) => {
     }
   });
 
+  // --- Host ends its session without disconnecting the socket ---
+  socket.on('host:end-session', () => {
+    const sessionId = socketToSession.get(socket.id);
+    if (!sessionId) return;
+    const session = sessions.get(sessionId);
+    if (!session || session.hostSocketId !== socket.id) return;
+
+    if (session.clientSocketId) {
+      io.to(session.clientSocketId).emit('session:host-disconnected', { sessionId });
+      socketToSession.delete(session.clientSocketId);
+      const clientSocket = io.sockets.sockets.get(session.clientSocketId);
+      clientSocket?.leave(sessionId);
+    }
+
+    sessions.delete(sessionId);
+    socketToSession.delete(socket.id);
+    socket.leave(sessionId);
+    console.log(`[host] session ${sessionId} ended by host (socket stays connected)`);
+  });
+
   // --- Remote input relay (client → host only) ---
   socket.on('input:command', (data) => {
     const sessionId = socketToSession.get(socket.id);
