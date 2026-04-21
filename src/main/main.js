@@ -10,7 +10,7 @@ const { FileTransferManager } = require('../transfer/file-transfer');
 const { ChatManager } = require('../chat/index');
 const { ConsoleManager } = require('../console/index');
 
-const SERVER_URL = 'http://localhost:3000';
+const SERVER_URL = process.env.REMOTELINK_SERVER_URL || 'https://remotelink-cq83.onrender.com';
 const REGISTRY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const REGISTRY_NAME = 'RemoteLink';
 

@@ -53,13 +53,13 @@ npx electron . --profile=node
 
 ## Next Steps (pick up here next session)
 
-- Set up cloud relay server so app works across different locations
-- Deploy relay server to Render.com or Railway.app (free tier)
-- Update server URL in app from localhost:3000 to cloud URL
-- Test connection between two real computers at different locations
-- Install RemoteLink on all computers using the .exe installer
-- Register all computers as Nodes using Master Key B2B4AE
-- Revisit Phase 9 (security/surveillance mode)
+- [x] Set up cloud relay server so app works across different locations
+- [x] Deploy relay server to Render.com or Railway.app (free tier)
+- [x] Update server URL in app from localhost:3000 to cloud URL (now https://remotelink-cq83.onrender.com)
+- [ ] Test connection between two real computers at different locations
+- [ ] Install RemoteLink on all computers using the .exe installer
+- [ ] Register all computers as Nodes using Master Key B2B4AE
+- [ ] Revisit Phase 9 (security/surveillance mode)
 
 ## Features Built
 
