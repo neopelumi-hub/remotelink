@@ -10,7 +10,7 @@ const { FileTransferManager } = require('../transfer/file-transfer');
 const { ChatManager } = require('../chat/index');
 const { ConsoleManager } = require('../console/index');
 
-const SERVER_URL = process.env.REMOTELINK_SERVER_URL || 'https://remotelink-cq83.onrender.com';
+const SERVER_URL = (process.env.REMOTELINK_SERVER_URL || 'https://remotelink-cq83.onrender.com').replace(/\/+$/, '');
 const REGISTRY_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const REGISTRY_NAME = 'RemoteLink';
 
@@ -135,10 +135,12 @@ function connectSocket() {
   if (socket && socket.connected) return socket;
 
   socket = ioClient(SERVER_URL, {
+    transports: ['websocket', 'polling'],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 5000,
-    timeout: 5000,
+    timeout: 20000,
+    forceNew: true,
   });
 
   socket.on('connect', () => {
