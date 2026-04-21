@@ -1033,6 +1033,10 @@ window.electronAPI.onSessionEvent((event) => {
       showToast('Client has disconnected', 'info');
       break;
 
+    case 'connected':
+      setStatus(true);
+      break;
+
     case 'disconnected':
       cleanupWebRTC();
       hideAccessModal();
