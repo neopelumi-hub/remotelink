@@ -1,6 +1,6 @@
 {
   "name": "remotelink",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "RemoteLink - Remote Desktop Application for Windows",
   "main": "src/main/main.js",
   "scripts": {

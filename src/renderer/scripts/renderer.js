@@ -29,12 +29,19 @@ let lastMouseMoveTime = 0;
 const MOUSE_THROTTLE_MS = 33; // cap at ~30 events/sec to reduce input congestion on the relay
 
 // --- Performance diagnostics ---
+// Mirror these to main stdout so they're visible when launching .exe from a terminal.
+function _rendererLog(level, message) {
+  const fn = console[level] || console.log;
+  fn(message);
+  try { window.electronAPI?.logToMain?.({ level, message }); } catch (_) {}
+}
+
 // Count how many input events are actually being sent, to verify throttling works.
 let _mouseMoveSentCount = 0;
 let _mouseMoveDroppedCount = 0;
 setInterval(() => {
   if (_mouseMoveSentCount > 0 || _mouseMoveDroppedCount > 0) {
-    console.log(`[perf] mouse-move: ${_mouseMoveSentCount} sent/sec, ${_mouseMoveDroppedCount} throttled/sec`);
+    _rendererLog('log', `[perf] mouse-move: ${_mouseMoveSentCount} sent/sec, ${_mouseMoveDroppedCount} throttled/sec`);
   }
   _mouseMoveSentCount = 0;
   _mouseMoveDroppedCount = 0;
@@ -47,7 +54,7 @@ setInterval(() => {
   const now = performance.now();
   const drift = Math.round(now - _lastHeartbeat - 1000);
   if (drift > 100) {
-    console.warn(`[perf] ⚠️ main-thread drift: ${drift}ms — something is blocking the renderer`);
+    _rendererLog('warn', `[perf] ⚠️ main-thread drift: ${drift}ms — something is blocking the renderer`);
   }
   _lastHeartbeat = now;
 }, 1000);
@@ -787,9 +794,7 @@ async function initHostWebRTC() {
       window.electronAPI.setActiveDisplay(screenSources[0].bounds);
     }
 
-    webrtcManager = new WebRTCManager();
-    // Apply the current stream quality setting before starting capture so
-    // resolution / frame-rate constraints are set correctly on the stream.
+    webrtcManager = new WebRTCManager('host');
     try {
       const settings = await window.electronAPI.getSettings();
       webrtcManager.setQuality(settings?.streamQuality || 'medium');
@@ -815,7 +820,7 @@ async function initHostWebRTC() {
 }
 
 function initClientWebRTC() {
-  webrtcManager = new WebRTCManager();
+  webrtcManager = new WebRTCManager('viewer');
   webrtcManager.createPeerConnection();
 
   webrtcManager.onRemoteStream = (stream) => {

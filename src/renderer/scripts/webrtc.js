@@ -3,6 +3,20 @@
 // Handles peer connections, screen capture, and media streaming
 // =============================================
 
+// Forward a log line to both the renderer devtools AND the main-process stdout,
+// so diagnostic output appears when the installed .exe is launched from a
+// terminal without DevTools open.
+function _forwardLog(level, message) {
+  const method = console[level] || console.log;
+  method(message);
+  try {
+    window.electronAPI?.logToMain?.({ level, message });
+  } catch (_) { /* ignore */ }
+}
+function rlog(message)   { _forwardLog('log', message); }
+function rwarn(message)  { _forwardLog('warn', message); }
+function rerror(message) { _forwardLog('error', message); }
+
 const QUALITY_PRESETS = {
   low:    { width: 1280, height: 720,  frameRate: 10, maxBitrateKbps:  800 },
   medium: { width: 1920, height: 1080, frameRate: 15, maxBitrateKbps: 2500 },
@@ -15,7 +29,10 @@ const QUALITY_PRESETS = {
 const PREFERRED_VIDEO_CODECS = ['video/VP8', 'video/VP9'];
 
 class WebRTCManager {
-  constructor() {
+  constructor(role) {
+    // role: 'host' (sharing screen) or 'viewer' (watching) — tags every log
+    this.role = role || 'unknown';
+    this.tag = `[${this.role}]`;
     this.peerConnection = null;
     this.localStream = null;
     this.pendingCandidates = [];
@@ -24,11 +41,12 @@ class WebRTCManager {
     this.quality = QUALITY_PRESETS.medium;
     this._statsInterval = null;
     this._lastStatsSnapshot = null;
+    rlog(`[WebRTC]${this.tag} WebRTCManager created`);
   }
 
   setQuality(preset) {
     this.quality = QUALITY_PRESETS[preset] || QUALITY_PRESETS.medium;
-    console.log(`[WebRTC] Quality set to ${preset}: target ${this.quality.width}x${this.quality.height} @ ${this.quality.frameRate}fps, cap ${this.quality.maxBitrateKbps}kbps`);
+    rlog(`[WebRTC]${this.tag} Quality set to ${preset}: target ${this.quality.width}x${this.quality.height} @ ${this.quality.frameRate}fps, cap ${this.quality.maxBitrateKbps}kbps`);
   }
 
   _serializeSdp(desc) {
@@ -82,21 +100,25 @@ class WebRTCManager {
         // Log each candidate type as it's discovered — confirms STUN/TURN are reachable.
         const type = this._extractCandidateType(event.candidate.candidate);
         this._gatheredCandidates[type] = (this._gatheredCandidates[type] || 0) + 1;
-        console.log(`[ice] gathered ${type} candidate: ${event.candidate.candidate.substring(0, 80)}`);
+        rlog(`[ice]${this.tag} gathered ${type} candidate: ${event.candidate.candidate.substring(0, 80)}`);
         window.electronAPI.sendWebRTCSignal('webrtc:ice-candidate', { candidate: plain });
       } else {
-        console.log(`[ice] gathering complete — host=${this._gatheredCandidates.host}, srflx(STUN)=${this._gatheredCandidates.srflx}, relay(TURN)=${this._gatheredCandidates.relay}, prflx=${this._gatheredCandidates.prflx}`);
+        rlog(`[ice]${this.tag} gathering complete — host=${this._gatheredCandidates.host}, srflx(STUN)=${this._gatheredCandidates.srflx}, relay(TURN)=${this._gatheredCandidates.relay}, prflx=${this._gatheredCandidates.prflx}`);
         if (this._gatheredCandidates.srflx === 0) {
-          console.warn('[ice] ⚠️ 0 STUN candidates gathered — STUN server may be unreachable (firewall?)');
+          rwarn(`[ice]${this.tag} ⚠️ 0 STUN candidates gathered — STUN server may be unreachable (firewall?)`);
         }
         if (this._gatheredCandidates.relay === 0) {
-          console.warn('[ice] ⚠️ 0 TURN candidates gathered — TURN server may be unreachable (falling back to direct or failing)');
+          rwarn(`[ice]${this.tag} ⚠️ 0 TURN candidates gathered — TURN server may be unreachable or slow to respond`);
         }
       }
     };
 
+    this.peerConnection.onicegatheringstatechange = () => {
+      rlog(`[ice]${this.tag} gathering state: ${this.peerConnection?.iceGatheringState}`);
+    };
+
     this.peerConnection.ontrack = (event) => {
-      console.log('[WebRTC] ontrack fired, streams:', event.streams.length, 'track:', event.track.kind);
+      rlog(`[WebRTC]${this.tag} ontrack fired, streams: ${event.streams.length}, track: ${event.track.kind}`);
       if (!this.onRemoteStream) return;
       if (event.streams && event.streams[0]) {
         this.onRemoteStream(event.streams[0]);
@@ -107,7 +129,7 @@ class WebRTCManager {
 
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection?.connectionState;
-      console.log('[WebRTC] Connection state:', state);
+      rlog(`[WebRTC]${this.tag} connection state: ${state}`);
       if (state === 'connected') {
         this._startStatsLogger();
         this._logSelectedCandidatePair();
@@ -118,12 +140,24 @@ class WebRTCManager {
 
     this.peerConnection.oniceconnectionstatechange = () => {
       const st = this.peerConnection?.iceConnectionState;
-      console.log(`[ice] connection state: ${st}`);
-      if (st === 'connected' || st === 'completed') {
-        console.log(`[ice] ✅ ICE established (state=${st})`);
+      rlog(`[ice]${this.tag} connection state: ${st}`);
+      if (st === 'checking') {
+        rlog(`[ice]${this.tag} 🔍 checking candidate pairs — connectivity checks in progress`);
+      } else if (st === 'connected') {
+        rlog(`[ice]${this.tag} ✅ ICE CONNECTED — media can flow now`);
+      } else if (st === 'completed') {
+        rlog(`[ice]${this.tag} ✅ ICE COMPLETED — all checks done, best pair locked in`);
+      } else if (st === 'disconnected') {
+        rwarn(`[ice]${this.tag} ⚠️ ICE disconnected (may recover automatically)`);
       } else if (st === 'failed') {
-        console.error('[ice] ❌ ICE failed — no viable candidate pair (neither direct nor TURN worked)');
+        rerror(`[ice]${this.tag} ❌ ICE FAILED — no viable candidate pair (neither direct nor TURN worked)`);
+      } else if (st === 'closed') {
+        rlog(`[ice]${this.tag} ICE closed`);
       }
+    };
+
+    this.peerConnection.onsignalingstatechange = () => {
+      rlog(`[WebRTC]${this.tag} signaling state: ${this.peerConnection?.signalingState}`);
     };
 
     return this.peerConnection;
@@ -141,7 +175,7 @@ class WebRTCManager {
   async _waitForIceGatheringComplete(timeoutMs = 3000) {
     if (!this.peerConnection) return;
     if (this.peerConnection.iceGatheringState === 'complete') {
-      console.log('[ice] gathering already complete before we waited');
+      rlog(`[ice]${this.tag} gathering already complete before we waited`);
       return;
     }
     const t0 = performance.now();
@@ -153,14 +187,13 @@ class WebRTCManager {
         }
       };
       this.peerConnection.addEventListener('icegatheringstatechange', onChange);
-      // Timeout so a broken TURN server doesn't hang the connection indefinitely
       setTimeout(() => {
         this.peerConnection?.removeEventListener('icegatheringstatechange', onChange);
-        console.warn(`[ice] gathering timed out after ${timeoutMs}ms — sending offer with partial candidate list (trickle ICE will continue in background)`);
+        rwarn(`[ice]${this.tag} gathering timed out after ${timeoutMs}ms — sending offer with partial candidate list (trickle ICE will continue in background)`);
         resolve();
       }, timeoutMs);
     });
-    console.log(`[ice] gathering finished in ${Math.round(performance.now() - t0)}ms`);
+    rlog(`[ice]${this.tag} gathering finished in ${Math.round(performance.now() - t0)}ms`);
   }
 
   // On successful connect, find the nominated candidate pair and identify
@@ -173,11 +206,10 @@ class WebRTCManager {
         if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r;
       });
       if (!pair) {
-        // Some browsers mark it 'selected' instead; fall back
         stats.forEach((r) => { if (r.type === 'candidate-pair' && r.selected) pair = r; });
       }
       if (!pair) {
-        console.warn('[ice] could not locate selected candidate pair in stats');
+        rwarn(`[ice]${this.tag} could not locate selected candidate pair in stats`);
         return;
       }
       stats.forEach((r) => {
@@ -194,17 +226,17 @@ class WebRTCManager {
       const banner = isRelay
         ? '⚠️ USING TURN RELAY — traffic proxied through openrelay.metered.ca (expect 100-200ms RTT)'
         : '✅ DIRECT PEER-TO-PEER — no relay';
-      console.log(`[ice] ${banner}`);
-      console.log(`[ice] selected pair: local=${localType}(${protocol}) ${localAddr} <-> remote=${remoteType} ${remoteAddr}`);
-      console.log(`[ice] RTT on this pair: ${pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) + 'ms' : 'unknown'}`);
+      rlog(`[ice]${this.tag} ${banner}`);
+      rlog(`[ice]${this.tag} selected pair: local=${localType}(${protocol}) ${localAddr} <-> remote=${remoteType} ${remoteAddr}`);
+      rlog(`[ice]${this.tag} RTT on this pair: ${pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) + 'ms' : 'unknown'}`);
     } catch (err) {
-      console.warn('[ice] failed to query selected candidate pair:', err.message);
+      rwarn(`[ice]${this.tag} failed to query selected candidate pair: ${err.message}`);
     }
   }
 
   async startScreenCapture(sourceId) {
     const q = this.quality;
-    console.log(`[perf] startScreenCapture sourceId=${sourceId} requesting ${q.width}x${q.height}@${q.frameRate}fps`);
+    rlog(`[perf]${this.tag} startScreenCapture sourceId=${sourceId} requesting ${q.width}x${q.height}@${q.frameRate}fps`);
     const tStart = performance.now();
 
     // Electron's chromeMediaSource desktop capture frequently IGNORES the
@@ -230,20 +262,18 @@ class WebRTCManager {
     // smoothness — correct for UI/text heavy screen content.
     if ('contentHint' in videoTrack) {
       videoTrack.contentHint = 'detail';
-      console.log(`[perf] videoTrack.contentHint = 'detail'`);
+      rlog(`[perf]${this.tag} videoTrack.contentHint = 'detail'`);
     }
 
     const settings = videoTrack.getSettings();
-    console.log(`[perf] ✅ ACTUAL CAPTURE SETTINGS: ${settings.width}x${settings.height} @ ${settings.frameRate}fps (getUserMedia took ${Math.round(tCapture - tStart)}ms)`);
+    rlog(`[perf]${this.tag} ✅ ACTUAL CAPTURE SETTINGS: ${settings.width}x${settings.height} @ ${settings.frameRate}fps (getUserMedia took ${Math.round(tCapture - tStart)}ms)`);
     if (settings.width > q.width || settings.height > q.height) {
-      console.warn(`[perf] ⚠️ capture came back LARGER than requested (wanted ${q.width}x${q.height}); will rely on sender-side scaleResolutionDownBy`);
+      rwarn(`[perf]${this.tag} ⚠️ capture came back LARGER than requested (wanted ${q.width}x${q.height}); will rely on sender-side scaleResolutionDownBy`);
     }
     if (settings.frameRate > q.frameRate * 1.2) {
-      console.warn(`[perf] ⚠️ capture came back at ${settings.frameRate}fps (wanted ${q.frameRate}); sender-side maxFramerate will throttle encode`);
+      rwarn(`[perf]${this.tag} ⚠️ capture came back at ${settings.frameRate}fps (wanted ${q.frameRate}); sender-side maxFramerate will throttle encode`);
     }
 
-    // Belt-and-braces: try applyConstraints. Often no-ops on desktop capture
-    // but when it does work it saves the downscale cost.
     try {
       await videoTrack.applyConstraints({
         width: { max: q.width },
@@ -251,9 +281,9 @@ class WebRTCManager {
         frameRate: { max: q.frameRate },
       });
       const after = videoTrack.getSettings();
-      console.log(`[perf] post-applyConstraints: ${after.width}x${after.height} @ ${after.frameRate}fps`);
+      rlog(`[perf]${this.tag} post-applyConstraints: ${after.width}x${after.height} @ ${after.frameRate}fps`);
     } catch (err) {
-      console.log(`[perf] applyConstraints unsupported on this track: ${err.message}`);
+      rlog(`[perf]${this.tag} applyConstraints unsupported on this track: ${err.message}`);
     }
 
     this.localStream = stream;
@@ -263,13 +293,13 @@ class WebRTCManager {
   _applyCodecPreferences() {
     try {
       if (!RTCRtpSender.getCapabilities) {
-        console.warn('[perf] RTCRtpSender.getCapabilities not available — cannot set codec preferences');
+        rwarn(`[perf]${this.tag} RTCRtpSender.getCapabilities not available — cannot set codec preferences`);
         return;
       }
       const caps = RTCRtpSender.getCapabilities('video');
       if (!caps || !caps.codecs) return;
 
-      console.log('[perf] available codecs:', caps.codecs.map(c => c.mimeType).join(', '));
+      rlog(`[perf]${this.tag} available codecs: ${caps.codecs.map(c => c.mimeType).join(', ')}`);
 
       const preferred = [];
       for (const name of PREFERRED_VIDEO_CODECS) {
@@ -284,11 +314,11 @@ class WebRTCManager {
       for (const transceiver of this.peerConnection.getTransceivers()) {
         if (transceiver.sender?.track?.kind === 'video' && transceiver.setCodecPreferences) {
           transceiver.setCodecPreferences(preferred);
-          console.log('[perf] codec preference order:', preferred.slice(0, 3).map(c => c.mimeType).join(' > '));
+          rlog(`[perf]${this.tag} codec preference order: ${preferred.slice(0, 3).map(c => c.mimeType).join(' > ')}`);
         }
       }
     } catch (err) {
-      console.warn('[perf] setCodecPreferences failed:', err.message);
+      rwarn(`[perf]${this.tag} setCodecPreferences failed: ${err.message}`);
     }
   }
 
@@ -314,28 +344,26 @@ class WebRTCManager {
         params.encodings[0].scaleResolutionDownBy = scale;        // actual downscale factor
         params.degradationPreference = 'maintain-resolution';
 
-        console.log(`[perf] setParameters: encoding_size=${Math.round(actualW/scale)}x${Math.round(actualH/scale)}, maxBitrate=${q.maxBitrateKbps}kbps, maxFramerate=${q.frameRate}, scaleDownBy=${scale.toFixed(2)}`);
+        rlog(`[perf]${this.tag} setParameters: encoding_size=${Math.round(actualW/scale)}x${Math.round(actualH/scale)}, maxBitrate=${q.maxBitrateKbps}kbps, maxFramerate=${q.frameRate}, scaleDownBy=${scale.toFixed(2)}`);
 
         await sender.setParameters(params);
 
-        // Read back to confirm the encoder actually accepted them.
         const actual = sender.getParameters();
         const e0 = actual.encodings?.[0] || {};
-        console.log(`[perf] ✅ params confirmed: maxBitrate=${e0.maxBitrate || 'null'}, maxFramerate=${e0.maxFramerate || 'null'}, scaleResolutionDownBy=${e0.scaleResolutionDownBy || 'null'}`);
+        rlog(`[perf]${this.tag} ✅ params confirmed: maxBitrate=${e0.maxBitrate || 'null'}, maxFramerate=${e0.maxFramerate || 'null'}, scaleResolutionDownBy=${e0.scaleResolutionDownBy || 'null'}`);
         if (e0.maxBitrate !== q.maxBitrateKbps * 1000) {
-          console.warn(`[perf] ⚠️ bitrate cap NOT applied (requested ${q.maxBitrateKbps * 1000}, got ${e0.maxBitrate})`);
+          rwarn(`[perf]${this.tag} ⚠️ bitrate cap NOT applied (requested ${q.maxBitrateKbps * 1000}, got ${e0.maxBitrate})`);
         }
       } catch (err) {
-        console.error('[perf] setParameters failed:', err.message, err);
+        rerror(`[perf]${this.tag} setParameters failed: ${err.message}`);
       }
     }
   }
 
-  // Periodic stats — proves what the encoder is actually doing vs what we asked for.
   _startStatsLogger() {
     this._stopStatsLogger();
     this._statsInterval = setInterval(() => this._logStats(), 5000);
-    console.log('[perf] stats logger started (every 5s)');
+    rlog(`[perf]${this.tag} stats logger started (every 5s)`);
   }
 
   _stopStatsLogger() {
@@ -366,7 +394,7 @@ class WebRTCManager {
       }
 
       if (!outbound) {
-        console.log('[perf-stats] (no outbound-rtp yet)');
+        rlog(`[perf-stats]${this.tag} (no outbound-rtp yet)`);
         return;
       }
 
@@ -389,12 +417,12 @@ class WebRTCManager {
       const pairType = localCand && remoteCand ? `${localCand.candidateType}→${remoteCand.candidateType}` : '?';
       const isRelay = localCand?.candidateType === 'relay' || remoteCand?.candidateType === 'relay';
 
-      console.log(`[perf-stats] path=${pairType}${isRelay ? ' (TURN RELAY)' : ' (DIRECT)'} codec=${codecName} size=${frameW}x${frameH} bitrate=${bitrateKbps}kbps fps=${fps} rtt=${rtt}ms loss=${loss}%  encoded=${outbound.framesEncoded} sent=${outbound.framesSent} dropped(qualityLimit=${outbound.qualityLimitationReason || 'none'})`);
+      rlog(`[perf-stats]${this.tag} path=${pairType}${isRelay ? ' (TURN RELAY)' : ' (DIRECT)'} codec=${codecName} size=${frameW}x${frameH} bitrate=${bitrateKbps}kbps fps=${fps} rtt=${rtt}ms loss=${loss}%  encoded=${outbound.framesEncoded} sent=${outbound.framesSent} dropped(qualityLimit=${outbound.qualityLimitationReason || 'none'})`);
       if (outbound.qualityLimitationReason && outbound.qualityLimitationReason !== 'none') {
-        console.warn(`[perf-stats] ⚠️ encoder is quality-limited by: ${outbound.qualityLimitationReason} (cpu = encoder can't keep up, bandwidth = network, other = something else)`);
+        rwarn(`[perf-stats]${this.tag} ⚠️ encoder is quality-limited by: ${outbound.qualityLimitationReason} (cpu = encoder can't keep up, bandwidth = network, other = something else)`);
       }
     } catch (err) {
-      console.warn('[perf-stats] getStats failed:', err.message);
+      rwarn(`[perf-stats]${this.tag} getStats failed: ${err.message}`);
     }
   }
 
@@ -422,7 +450,7 @@ class WebRTCManager {
     await this._waitForIceGatheringComplete();
 
     const sdpPlain = this._serializeSdp(this.peerConnection.localDescription);
-    console.log('[WebRTC] Sending offer, SDP length:', sdpPlain.sdp.length);
+    rlog(`[WebRTC]${this.tag} sending offer, SDP length: ${sdpPlain.sdp.length}`);
     window.electronAPI.sendWebRTCSignal('webrtc:offer', { sdp: sdpPlain, monitors: monitorInfo });
   }
 

@@ -779,6 +779,15 @@ ipcMain.handle('machine:get-info', () => ({
 
 ipcMain.handle('app:get-version', () => app.getVersion());
 
+// Mirror renderer-side diagnostic logs (ICE, perf-stats, WebRTC) to main
+// stdout so they're visible when the installed .exe is launched from a terminal.
+ipcMain.on('log:forward', (_e, payload) => {
+  const level = (payload && payload.level) || 'log';
+  const message = (payload && payload.message) || '';
+  const fn = console[level] || console.log;
+  fn(message);
+});
+
 // Host: create a session
 ipcMain.handle('server:start-hosting', async () => {
   try {

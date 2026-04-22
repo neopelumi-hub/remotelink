@@ -14,6 +14,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App info
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
 
+  // Forward a renderer-side log line to the main process so it shows up in
+  // stdout (useful when the installed .exe is launched from a terminal).
+  logToMain: (payload) => ipcRenderer.send('log:forward', payload),
+
   // Machine ID & access control
   getMachineInfo: () => ipcRenderer.invoke('machine:get-info'),
   joinByMachineId: (targetMachineId) => ipcRenderer.invoke('machine:join-by-id', targetMachineId),
