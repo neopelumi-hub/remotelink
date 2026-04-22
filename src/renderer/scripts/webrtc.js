@@ -51,17 +51,47 @@ class WebRTCManager {
 
     this.peerConnection = new RTCPeerConnection({
       iceServers: [
+        // Public STUN for reflexive candidate discovery (direct P2P when NAT allows)
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
+        // Open Relay Project — free public TURN, last-resort fallback when direct fails.
+        // UDP 80 first, then TCP 443 for locked-down networks that only allow HTTPS.
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
       ],
+      iceCandidatePoolSize: 4,
     });
 
+    this._gatheredCandidates = { host: 0, srflx: 0, relay: 0, prflx: 0, other: 0 };
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
         const plain = this._serializeCandidate(event.candidate);
+        // Log each candidate type as it's discovered — confirms STUN/TURN are reachable.
+        const type = this._extractCandidateType(event.candidate.candidate);
+        this._gatheredCandidates[type] = (this._gatheredCandidates[type] || 0) + 1;
+        console.log(`[ice] gathered ${type} candidate: ${event.candidate.candidate.substring(0, 80)}`);
         window.electronAPI.sendWebRTCSignal('webrtc:ice-candidate', { candidate: plain });
       } else {
-        console.log('[WebRTC] ICE gathering complete');
+        console.log(`[ice] gathering complete — host=${this._gatheredCandidates.host}, srflx(STUN)=${this._gatheredCandidates.srflx}, relay(TURN)=${this._gatheredCandidates.relay}, prflx=${this._gatheredCandidates.prflx}`);
+        if (this._gatheredCandidates.srflx === 0) {
+          console.warn('[ice] ⚠️ 0 STUN candidates gathered — STUN server may be unreachable (firewall?)');
+        }
+        if (this._gatheredCandidates.relay === 0) {
+          console.warn('[ice] ⚠️ 0 TURN candidates gathered — TURN server may be unreachable (falling back to direct or failing)');
+        }
       }
     };
 
@@ -78,16 +108,98 @@ class WebRTCManager {
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection?.connectionState;
       console.log('[WebRTC] Connection state:', state);
-      if (state === 'connected') this._startStatsLogger();
+      if (state === 'connected') {
+        this._startStatsLogger();
+        this._logSelectedCandidatePair();
+      }
       if (state === 'disconnected' || state === 'failed' || state === 'closed') this._stopStatsLogger();
       if (this.onConnectionStateChange) this.onConnectionStateChange(state);
     };
 
     this.peerConnection.oniceconnectionstatechange = () => {
-      console.log('[WebRTC] ICE connection state:', this.peerConnection?.iceConnectionState);
+      const st = this.peerConnection?.iceConnectionState;
+      console.log(`[ice] connection state: ${st}`);
+      if (st === 'connected' || st === 'completed') {
+        console.log(`[ice] ✅ ICE established (state=${st})`);
+      } else if (st === 'failed') {
+        console.error('[ice] ❌ ICE failed — no viable candidate pair (neither direct nor TURN worked)');
+      }
     };
 
     return this.peerConnection;
+  }
+
+  _extractCandidateType(candidateStr) {
+    // candidate:foundation component protocol priority ip port typ TYPE ...
+    const m = candidateStr.match(/ typ ([a-z]+)/);
+    return m ? m[1] : 'other';
+  }
+
+  // Wait for ICE gathering to complete (all candidates discovered) before we
+  // send the offer, so the peer receives a full candidate list in one shot
+  // instead of trickling them in over the relay afterwards.
+  async _waitForIceGatheringComplete(timeoutMs = 3000) {
+    if (!this.peerConnection) return;
+    if (this.peerConnection.iceGatheringState === 'complete') {
+      console.log('[ice] gathering already complete before we waited');
+      return;
+    }
+    const t0 = performance.now();
+    await new Promise((resolve) => {
+      const onChange = () => {
+        if (this.peerConnection?.iceGatheringState === 'complete') {
+          this.peerConnection.removeEventListener('icegatheringstatechange', onChange);
+          resolve();
+        }
+      };
+      this.peerConnection.addEventListener('icegatheringstatechange', onChange);
+      // Timeout so a broken TURN server doesn't hang the connection indefinitely
+      setTimeout(() => {
+        this.peerConnection?.removeEventListener('icegatheringstatechange', onChange);
+        console.warn(`[ice] gathering timed out after ${timeoutMs}ms — sending offer with partial candidate list (trickle ICE will continue in background)`);
+        resolve();
+      }, timeoutMs);
+    });
+    console.log(`[ice] gathering finished in ${Math.round(performance.now() - t0)}ms`);
+  }
+
+  // On successful connect, find the nominated candidate pair and identify
+  // whether we're peer-to-peer (host/srflx) or TURN-relayed (relay).
+  async _logSelectedCandidatePair() {
+    try {
+      const stats = await this.peerConnection.getStats();
+      let pair = null, local = null, remote = null;
+      stats.forEach((r) => {
+        if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') pair = r;
+      });
+      if (!pair) {
+        // Some browsers mark it 'selected' instead; fall back
+        stats.forEach((r) => { if (r.type === 'candidate-pair' && r.selected) pair = r; });
+      }
+      if (!pair) {
+        console.warn('[ice] could not locate selected candidate pair in stats');
+        return;
+      }
+      stats.forEach((r) => {
+        if (r.id === pair.localCandidateId) local = r;
+        if (r.id === pair.remoteCandidateId) remote = r;
+      });
+      const localType = local?.candidateType || '?';
+      const remoteType = remote?.candidateType || '?';
+      const protocol = local?.protocol || '?';
+      const localAddr = local ? `${local.address || local.ip}:${local.port}` : '?';
+      const remoteAddr = remote ? `${remote.address || remote.ip}:${remote.port}` : '?';
+
+      const isRelay = localType === 'relay' || remoteType === 'relay';
+      const banner = isRelay
+        ? '⚠️ USING TURN RELAY — traffic proxied through openrelay.metered.ca (expect 100-200ms RTT)'
+        : '✅ DIRECT PEER-TO-PEER — no relay';
+      console.log(`[ice] ${banner}`);
+      console.log(`[ice] selected pair: local=${localType}(${protocol}) ${localAddr} <-> remote=${remoteType} ${remoteAddr}`);
+      console.log(`[ice] RTT on this pair: ${pair.currentRoundTripTime != null ? Math.round(pair.currentRoundTripTime * 1000) + 'ms' : 'unknown'}`);
+    } catch (err) {
+      console.warn('[ice] failed to query selected candidate pair:', err.message);
+    }
   }
 
   async startScreenCapture(sourceId) {
@@ -237,7 +349,7 @@ class WebRTCManager {
     if (!this.peerConnection || this.peerConnection.connectionState !== 'connected') return;
     try {
       const stats = await this.peerConnection.getStats();
-      let outbound = null, remoteInbound = null, codec = null, candidatePair = null;
+      let outbound = null, remoteInbound = null, codec = null, candidatePair = null, localCand = null, remoteCand = null;
       stats.forEach((r) => {
         if (r.type === 'outbound-rtp' && r.kind === 'video') outbound = r;
         else if (r.type === 'remote-inbound-rtp' && r.kind === 'video') remoteInbound = r;
@@ -245,6 +357,12 @@ class WebRTCManager {
       });
       if (outbound?.codecId) {
         stats.forEach((r) => { if (r.id === outbound.codecId) codec = r; });
+      }
+      if (candidatePair) {
+        stats.forEach((r) => {
+          if (r.id === candidatePair.localCandidateId) localCand = r;
+          if (r.id === candidatePair.remoteCandidateId) remoteCand = r;
+        });
       }
 
       if (!outbound) {
@@ -268,8 +386,10 @@ class WebRTCManager {
       const frameH = outbound.frameHeight || '?';
       const rtt = candidatePair?.currentRoundTripTime != null ? Math.round(candidatePair.currentRoundTripTime * 1000) : '?';
       const loss = remoteInbound?.fractionLost != null ? (remoteInbound.fractionLost * 100).toFixed(1) : '?';
+      const pairType = localCand && remoteCand ? `${localCand.candidateType}→${remoteCand.candidateType}` : '?';
+      const isRelay = localCand?.candidateType === 'relay' || remoteCand?.candidateType === 'relay';
 
-      console.log(`[perf-stats] codec=${codecName} size=${frameW}x${frameH} bitrate=${bitrateKbps}kbps fps=${fps} rtt=${rtt}ms loss=${loss}%  encoded=${outbound.framesEncoded} sent=${outbound.framesSent} dropped(qualityLimit=${outbound.qualityLimitationReason || 'none'})`);
+      console.log(`[perf-stats] path=${pairType}${isRelay ? ' (TURN RELAY)' : ' (DIRECT)'} codec=${codecName} size=${frameW}x${frameH} bitrate=${bitrateKbps}kbps fps=${fps} rtt=${rtt}ms loss=${loss}%  encoded=${outbound.framesEncoded} sent=${outbound.framesSent} dropped(qualityLimit=${outbound.qualityLimitationReason || 'none'})`);
       if (outbound.qualityLimitationReason && outbound.qualityLimitationReason !== 'none') {
         console.warn(`[perf-stats] ⚠️ encoder is quality-limited by: ${outbound.qualityLimitationReason} (cpu = encoder can't keep up, bandwidth = network, other = something else)`);
       }
@@ -296,6 +416,11 @@ class WebRTCManager {
 
     await this._applyEncoderParams();
 
+    // Wait for STUN/TURN candidate gathering to finish so the offer SDP
+    // ships with a complete candidate list instead of trickling them in
+    // afterwards. Dramatically shortens time-to-first-frame.
+    await this._waitForIceGatheringComplete();
+
     const sdpPlain = this._serializeSdp(this.peerConnection.localDescription);
     console.log('[WebRTC] Sending offer, SDP length:', sdpPlain.sdp.length);
     window.electronAPI.sendWebRTCSignal('webrtc:offer', { sdp: sdpPlain, monitors: monitorInfo });
@@ -306,6 +431,7 @@ class WebRTCManager {
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
     const answer = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answer);
+    await this._waitForIceGatheringComplete();
     window.electronAPI.sendWebRTCSignal('webrtc:answer', { sdp: this._serializeSdp(this.peerConnection.localDescription) });
     this._flushPendingCandidates();
   }
