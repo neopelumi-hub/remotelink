@@ -54,30 +54,28 @@ function setSdpVideoBandwidth(sdp, kbps) {
   return out.join('\r\n');
 }
 
+// All presets capped at 720p — reduces encoder load so the framerate holds.
+// Screen content at 720p is still sharp; the CPU savings vs 1080p are large.
 const QUALITY_PRESETS = {
-  low:    { width: 1280, height: 720,  frameRate: 15 },
-  medium: { width: 1920, height: 1080, frameRate: 24 },
-  high:   { width: 1920, height: 1080, frameRate: 30 },
+  low:    { width: 1280, height: 720, frameRate: 10 },
+  medium: { width: 1280, height: 720, frameRate: 15 },
+  high:   { width: 1280, height: 720, frameRate: 24 },
 };
 
-// Hard floor and ceiling applied to the RTP sender encoding regardless of
-// preset. minBitrate stops WebRTC's congestion controller from undershooting
-// on fast links (300 Mbps uplink but the default estimator was clamping to
-// ~200 kbps); maxBitrate is a generous ceiling so quality can scale up when
-// the encoder has headroom.
 const MIN_BITRATE_BPS = 1_000_000;   // 1 Mbps floor
 const MAX_BITRATE_BPS = 8_000_000;   // 8 Mbps ceiling
 const SDP_BANDWIDTH_KBPS = 8000;     // matches b=AS:8000 line in SDP
-const CAPTURE_FRAMERATE = 30;        // always capture at 30fps; encoder throttles per-preset
+const CAPTURE_FRAMERATE = 24;        // capped at 24 fps to give the encoder breathing room
 
-// VP8 first: Chromium's VP8 encoder is significantly faster than VP9,
-// especially on mid-tier CPUs. For screen content the quality gap at our
-// bitrates (≤5 Mbps) is small. VP9 kept as a fallback if the peer prefers it.
-const PREFERRED_VIDEO_CODECS = ['video/VP8', 'video/VP9'];
+// H.264 first: on Windows, Chromium/Electron can offload H.264 encode to the
+// GPU via Media Foundation (Intel Quick Sync / AMD VCE / NVIDIA NVENC), which
+// dramatically reduces CPU cost for screen-content encoding. VP8 is the
+// universal software fallback if H.264 isn't negotiated. VP9 kept last as
+// heaviest codec to avoid on CPU-bound systems.
+const PREFERRED_VIDEO_CODECS = ['video/H264', 'video/VP8', 'video/VP9'];
 
 class WebRTCManager {
   constructor(role) {
-    // role: 'host' (sharing screen) or 'viewer' (watching) — tags every log
     this.role = role || 'unknown';
     this.tag = `[${this.role}]`;
     this.peerConnection = null;
@@ -88,7 +86,56 @@ class WebRTCManager {
     this.quality = QUALITY_PRESETS.medium;
     this._statsInterval = null;
     this._lastStatsSnapshot = null;
+    this.inputChannel = null;           // RTCDataChannel for keyboard/mouse
     rlog(`[WebRTC]${this.tag} WebRTCManager created`);
+  }
+
+  _setupHostInputChannel() {
+    // Host creates the channel before the offer, so it appears in the SDP.
+    // ordered:true + maxRetransmits:3 is a reliability/latency compromise —
+    // input events must arrive in order, but we don't want to block on
+    // retransmits beyond a handful for a 5ms-RTT link.
+    const ch = this.peerConnection.createDataChannel('input', {
+      ordered: true,
+      maxRetransmits: 3,
+    });
+    this.inputChannel = ch;
+    rlog(`[dc]${this.tag} created 'input' data channel (readyState=${ch.readyState})`);
+
+    ch.onopen = () => rlog(`[dc]${this.tag} 🎯 input channel OPEN — viewer input now bypasses the socket.io relay`);
+    ch.onclose = () => rlog(`[dc]${this.tag} input channel closed`);
+    ch.onerror = (err) => rwarn(`[dc]${this.tag} input channel error: ${err?.error?.message || err?.message || err}`);
+    ch.onmessage = (event) => {
+      try {
+        const cmd = JSON.parse(event.data);
+        window.electronAPI?.executeInputLocally?.(cmd);
+      } catch (e) {
+        rwarn(`[dc]${this.tag} failed to parse input message: ${e.message}`);
+      }
+    };
+  }
+
+  _setupViewerInputChannel(channel) {
+    this.inputChannel = channel;
+    rlog(`[dc]${this.tag} received 'input' data channel (readyState=${channel.readyState})`);
+    channel.onopen = () => rlog(`[dc]${this.tag} 🎯 input channel OPEN — input now bypasses the socket.io relay`);
+    channel.onclose = () => rlog(`[dc]${this.tag} input channel closed`);
+    channel.onerror = (err) => rwarn(`[dc]${this.tag} input channel error: ${err?.error?.message || err?.message || err}`);
+  }
+
+  // Called from the viewer's input event handlers. Returns true if the
+  // command was sent via the data channel; false means the caller should
+  // fall back to the socket.io IPC path.
+  sendInput(cmd) {
+    const ch = this.inputChannel;
+    if (!ch || ch.readyState !== 'open') return false;
+    try {
+      ch.send(JSON.stringify(cmd));
+      return true;
+    } catch (err) {
+      rwarn(`[dc]${this.tag} send failed: ${err.message}`);
+      return false;
+    }
   }
 
   setQuality(preset) {
@@ -135,12 +182,20 @@ class WebRTCManager {
         },
       ],
       iceCandidatePoolSize: 4,
-      // Legacy key: Chromium dropped `googCpuOveruseDetection` support around M72
-      // and silently ignores it. Kept here as requested; the real equivalent is
-      // `degradationPreference: 'maintain-framerate'` on the sender encoding,
-      // which we set in _applyEncoderParams().
       googCpuOveruseDetection: false,
     });
+
+    // Input DataChannel — host creates before the first offer so it appears
+    // in the SDP; viewer receives it via ondatachannel below.
+    if (this.role === 'host') {
+      this._setupHostInputChannel();
+    }
+
+    this.peerConnection.ondatachannel = (event) => {
+      if (event.channel.label === 'input' && this.role === 'viewer') {
+        this._setupViewerInputChannel(event.channel);
+      }
+    };
 
     this._gatheredCandidates = { host: 0, srflx: 0, relay: 0, prflx: 0, other: 0 };
     this.peerConnection.onicecandidate = (event) => {

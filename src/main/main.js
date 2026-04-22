@@ -779,6 +779,21 @@ ipcMain.handle('machine:get-info', () => ({
 
 ipcMain.handle('app:get-version', () => app.getVersion());
 
+// Host receives an input command via WebRTC data channel (bypasses the
+// socket.io relay). Renderer forwards it here so the native input controller
+// can execute it the same way as socket-delivered commands.
+ipcMain.on('input:execute-local', (_e, data) => {
+  if (!inputController) {
+    try {
+      inputController = require('../host/input-controller');
+    } catch (err) {
+      console.error('[Main] Failed to load input controller:', err.message);
+      return;
+    }
+  }
+  inputController.handleCommand(data, activeDisplayBounds);
+});
+
 // Mirror renderer-side diagnostic logs (ICE, perf-stats, WebRTC) to main
 // stdout so they're visible when the installed .exe is launched from a terminal.
 ipcMain.on('log:forward', (_e, payload) => {

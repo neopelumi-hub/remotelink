@@ -28,6 +28,16 @@ let controlActive = false;
 let lastMouseMoveTime = 0;
 const MOUSE_THROTTLE_MS = 33; // cap at ~30 events/sec to reduce input congestion on the relay
 
+// Send an input command over the WebRTC data channel if it's open
+// (direct peer-to-peer, ~5ms RTT), otherwise fall back to the socket.io
+// relay path (adds 150-200ms but always works).
+function sendInputCmd(cmd) {
+  if (typeof webrtcManager !== 'undefined' && webrtcManager && webrtcManager.sendInput && webrtcManager.sendInput(cmd)) {
+    return;
+  }
+  window.electronAPI.sendInputCommand(cmd);
+}
+
 // --- Performance diagnostics ---
 // Mirror these to main stdout so they're visible when launching .exe from a terminal.
 function _rendererLog(level, message) {
@@ -484,7 +494,7 @@ function disableControl() {
   // Release any potentially stuck modifier keys on the host
   ['ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
    'AltLeft', 'AltRight', 'MetaLeft', 'MetaRight'].forEach(code => {
-    window.electronAPI.sendInputCommand({ type: 'key-up', code });
+    sendInputCmd({ type: 'key-up', code });
   });
 
   const video = document.getElementById('remote-video');
@@ -563,7 +573,7 @@ remoteVideo.addEventListener('mousemove', (e) => {
   if (!coords.inBounds) return;
 
   _mouseMoveSentCount++;
-  window.electronAPI.sendInputCommand({
+  sendInputCmd({
     type: 'mouse-move',
     x: coords.x,
     y: coords.y,
@@ -576,7 +586,7 @@ remoteVideo.addEventListener('mousedown', (e) => {
   const button = ['left', 'middle', 'right'][e.button] || 'left';
   const coords = getScaledCoords(e);
 
-  window.electronAPI.sendInputCommand({
+  sendInputCmd({
     type: 'mouse-down',
     button,
     x: coords.x,
@@ -589,7 +599,7 @@ remoteVideo.addEventListener('mouseup', (e) => {
   e.preventDefault();
   const button = ['left', 'middle', 'right'][e.button] || 'left';
 
-  window.electronAPI.sendInputCommand({
+  sendInputCmd({
     type: 'mouse-up',
     button,
   });
@@ -599,7 +609,7 @@ remoteVideo.addEventListener('wheel', (e) => {
   if (!controlActive) return;
   e.preventDefault();
 
-  window.electronAPI.sendInputCommand({
+  sendInputCmd({
     type: 'mouse-scroll',
     deltaX: e.deltaX,
     deltaY: e.deltaY,
@@ -636,7 +646,7 @@ document.addEventListener('keydown', (e) => {
   }
 
   e.preventDefault();
-  window.electronAPI.sendInputCommand({
+  sendInputCmd({
     type: 'key-down',
     code: e.code,
     key: e.key,
@@ -647,7 +657,7 @@ document.addEventListener('keyup', (e) => {
   if (!controlActive) return;
   e.preventDefault();
 
-  window.electronAPI.sendInputCommand({
+  sendInputCmd({
     type: 'key-up',
     code: e.code,
     key: e.key,

@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Remote input control
   sendInputCommand: (data) => ipcRenderer.send('input:send-command', data),
   setActiveDisplay: (bounds) => ipcRenderer.send('input:set-active-display', bounds),
+  // Called on the HOST when the input arrives over the WebRTC data channel.
+  // The renderer already has the command; we just hand it to the main process
+  // so the native input controller can execute it — no socket.io hop.
+  executeInputLocally: (data) => ipcRenderer.send('input:execute-local', data),
 
   // Chat
   sendChatMessage: (data) => ipcRenderer.send('chat:send-message', data),
