@@ -17,11 +17,58 @@ function rlog(message)   { _forwardLog('log', message); }
 function rwarn(message)  { _forwardLog('warn', message); }
 function rerror(message) { _forwardLog('error', message); }
 
+// Inject `b=AS:<kbps>` into the video media section of an SDP. This is the
+// Application-Specific bandwidth hint, expressed in kbps. Chromium honors it
+// as a session-level cap in addition to sender.setParameters's maxBitrate.
+// If a b= line already exists for video, replace it; otherwise insert after
+// the c= line that follows m=video.
+function setSdpVideoBandwidth(sdp, kbps) {
+  const lines = sdp.split(/\r?\n/);
+  const out = [];
+  let inVideo = false;
+  let insertedForThisSection = false;
+  for (const line of lines) {
+    if (line.startsWith('m=video')) {
+      inVideo = true;
+      insertedForThisSection = false;
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith('m=') && !line.startsWith('m=video')) {
+      inVideo = false;
+    }
+    if (inVideo && line.startsWith('b=AS:')) {
+      // Replace existing bandwidth line
+      out.push(`b=AS:${kbps}`);
+      insertedForThisSection = true;
+      continue;
+    }
+    if (inVideo && !insertedForThisSection && line.startsWith('c=')) {
+      out.push(line);
+      out.push(`b=AS:${kbps}`);
+      insertedForThisSection = true;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\r\n');
+}
+
 const QUALITY_PRESETS = {
-  low:    { width: 1280, height: 720,  frameRate: 10, maxBitrateKbps:  800 },
-  medium: { width: 1920, height: 1080, frameRate: 15, maxBitrateKbps: 2500 },
-  high:   { width: 1920, height: 1080, frameRate: 30, maxBitrateKbps: 5000 },
+  low:    { width: 1280, height: 720,  frameRate: 15 },
+  medium: { width: 1920, height: 1080, frameRate: 24 },
+  high:   { width: 1920, height: 1080, frameRate: 30 },
 };
+
+// Hard floor and ceiling applied to the RTP sender encoding regardless of
+// preset. minBitrate stops WebRTC's congestion controller from undershooting
+// on fast links (300 Mbps uplink but the default estimator was clamping to
+// ~200 kbps); maxBitrate is a generous ceiling so quality can scale up when
+// the encoder has headroom.
+const MIN_BITRATE_BPS = 1_000_000;   // 1 Mbps floor
+const MAX_BITRATE_BPS = 8_000_000;   // 8 Mbps ceiling
+const SDP_BANDWIDTH_KBPS = 8000;     // matches b=AS:8000 line in SDP
+const CAPTURE_FRAMERATE = 30;        // always capture at 30fps; encoder throttles per-preset
 
 // VP8 first: Chromium's VP8 encoder is significantly faster than VP9,
 // especially on mid-tier CPUs. For screen content the quality gap at our
@@ -46,7 +93,7 @@ class WebRTCManager {
 
   setQuality(preset) {
     this.quality = QUALITY_PRESETS[preset] || QUALITY_PRESETS.medium;
-    rlog(`[WebRTC]${this.tag} Quality set to ${preset}: target ${this.quality.width}x${this.quality.height} @ ${this.quality.frameRate}fps, cap ${this.quality.maxBitrateKbps}kbps`);
+    rlog(`[WebRTC]${this.tag} Quality set to ${preset}: target ${this.quality.width}x${this.quality.height} @ ${this.quality.frameRate}fps — bitrate floor=${MIN_BITRATE_BPS/1000}kbps ceiling=${MAX_BITRATE_BPS/1000}kbps`);
   }
 
   _serializeSdp(desc) {
@@ -69,11 +116,8 @@ class WebRTCManager {
 
     this.peerConnection = new RTCPeerConnection({
       iceServers: [
-        // Public STUN for reflexive candidate discovery (direct P2P when NAT allows)
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        // Open Relay Project — free public TURN, last-resort fallback when direct fails.
-        // UDP 80 first, then TCP 443 for locked-down networks that only allow HTTPS.
         {
           urls: 'turn:openrelay.metered.ca:80',
           username: 'openrelayproject',
@@ -91,6 +135,11 @@ class WebRTCManager {
         },
       ],
       iceCandidatePoolSize: 4,
+      // Legacy key: Chromium dropped `googCpuOveruseDetection` support around M72
+      // and silently ignores it. Kept here as requested; the real equivalent is
+      // `degradationPreference: 'maintain-framerate'` on the sender encoding,
+      // which we set in _applyEncoderParams().
+      googCpuOveruseDetection: false,
     });
 
     this._gatheredCandidates = { host: 0, srflx: 0, relay: 0, prflx: 0, other: 0 };
@@ -242,19 +291,19 @@ class WebRTCManager {
 
   async startScreenCapture(sourceId) {
     const q = this.quality;
-    rlog(`[perf]${this.tag} startScreenCapture sourceId=${sourceId} requesting ${q.width}x${q.height}@${q.frameRate}fps`);
+    rlog(`[perf]${this.tag} startScreenCapture sourceId=${sourceId} requesting capture at ${CAPTURE_FRAMERATE}fps (encoder will throttle to preset's ${q.frameRate}fps)`);
     const tStart = performance.now();
 
-    // Electron's chromeMediaSource desktop capture frequently IGNORES the
-    // width/height mandatory constraints. We still pass them (they sometimes
-    // work on single-monitor setups) and enforce downscale via the RTP sender.
+    // Always capture at 30fps regardless of preset — the encoder-side
+    // maxFramerate throttles the final output. Capturing at the max means
+    // switching presets mid-session doesn't need a new getUserMedia call.
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: sourceId,
-          maxFrameRate: q.frameRate,
+          maxFrameRate: CAPTURE_FRAMERATE,
           maxWidth: q.width,
           maxHeight: q.height,
         },
@@ -337,28 +386,39 @@ class WebRTCManager {
         const params = sender.getParameters();
         params.encodings = params.encodings && params.encodings.length ? params.encodings : [{}];
 
-        // Determine actual capture resolution so scaleResolutionDownBy is correct.
         const trackSettings = sender.track.getSettings();
         const actualW = trackSettings.width || q.width;
         const actualH = trackSettings.height || q.height;
-        const scaleW = actualW / q.width;
-        const scaleH = actualH / q.height;
-        const scale = Math.max(1, Math.max(scaleW, scaleH));
+        const scale = Math.max(1, Math.max(actualW / q.width, actualH / q.height));
 
-        params.encodings[0].maxBitrate = q.maxBitrateKbps * 1000;
-        params.encodings[0].maxFramerate = q.frameRate;          // actual encoder fps cap
-        params.encodings[0].scaleResolutionDownBy = scale;        // actual downscale factor
-        params.degradationPreference = 'maintain-resolution';
+        // minBitrate forces the congestion controller to hold a floor even
+        // when its (often-pessimistic) bandwidth estimate suggests going lower.
+        // maxBitrate caps peak so we don't blow up the uplink on a big change.
+        params.encodings[0].minBitrate = MIN_BITRATE_BPS;
+        params.encodings[0].maxBitrate = MAX_BITRATE_BPS;
+        params.encodings[0].maxFramerate = q.frameRate;
+        params.encodings[0].scaleResolutionDownBy = scale;
+        params.encodings[0].networkPriority = 'high';
+        params.encodings[0].priority = 'high';
+        // 'maintain-framerate' = drop resolution before framerate when CPU-bound.
+        // User wants sustained 30fps, so resolution is what gives way first.
+        params.degradationPreference = 'maintain-framerate';
 
-        rlog(`[perf]${this.tag} setParameters: encoding_size=${Math.round(actualW/scale)}x${Math.round(actualH/scale)}, maxBitrate=${q.maxBitrateKbps}kbps, maxFramerate=${q.frameRate}, scaleDownBy=${scale.toFixed(2)}`);
+        rlog(`[perf]${this.tag} setParameters: encoding_size=${Math.round(actualW/scale)}x${Math.round(actualH/scale)}, minBitrate=${MIN_BITRATE_BPS/1000}kbps, maxBitrate=${MAX_BITRATE_BPS/1000}kbps, maxFramerate=${q.frameRate}, scaleDownBy=${scale.toFixed(2)}, degradationPref=maintain-framerate`);
 
         await sender.setParameters(params);
 
         const actual = sender.getParameters();
         const e0 = actual.encodings?.[0] || {};
-        rlog(`[perf]${this.tag} ✅ params confirmed: maxBitrate=${e0.maxBitrate || 'null'}, maxFramerate=${e0.maxFramerate || 'null'}, scaleResolutionDownBy=${e0.scaleResolutionDownBy || 'null'}`);
-        if (e0.maxBitrate !== q.maxBitrateKbps * 1000) {
-          rwarn(`[perf]${this.tag} ⚠️ bitrate cap NOT applied (requested ${q.maxBitrateKbps * 1000}, got ${e0.maxBitrate})`);
+        rlog(`[perf]${this.tag} ✅ params confirmed: minBitrate=${e0.minBitrate || 'null'}, maxBitrate=${e0.maxBitrate || 'null'}, maxFramerate=${e0.maxFramerate || 'null'}, scaleResolutionDownBy=${e0.scaleResolutionDownBy || 'null'}, networkPriority=${e0.networkPriority || 'null'}`);
+        if (e0.maxBitrate !== MAX_BITRATE_BPS) {
+          rwarn(`[perf]${this.tag} ⚠️ maxBitrate NOT applied (requested ${MAX_BITRATE_BPS}, got ${e0.maxBitrate})`);
+        }
+        if (e0.minBitrate != null && e0.minBitrate !== MIN_BITRATE_BPS) {
+          rwarn(`[perf]${this.tag} ⚠️ minBitrate NOT applied (requested ${MIN_BITRATE_BPS}, got ${e0.minBitrate})`);
+        }
+        if (e0.minBitrate == null) {
+          rwarn(`[perf]${this.tag} ⚠️ minBitrate not present in read-back — this Chromium build may not expose it in getParameters, but it was still set on the sender`);
         }
       } catch (err) {
         rerror(`[perf]${this.tag} setParameters failed: ${err.message}`);
@@ -504,6 +564,11 @@ class WebRTCManager {
     rlog(`[WebRTC]${this.tag} calling createOffer (AFTER addTrack)`);
     const offer = await this.peerConnection.createOffer();
     rlog(`[WebRTC]${this.tag} createOffer returned sdp length=${offer.sdp.length}, contains m=video=${offer.sdp.includes('m=video')}`);
+
+    // Inject b=AS:8000 into the video section to hint the session bandwidth.
+    offer.sdp = setSdpVideoBandwidth(offer.sdp, SDP_BANDWIDTH_KBPS);
+    rlog(`[WebRTC]${this.tag} injected b=AS:${SDP_BANDWIDTH_KBPS} into offer SDP`);
+
     await this.peerConnection.setLocalDescription(offer);
 
     await this._applyEncoderParams();
@@ -521,6 +586,9 @@ class WebRTCManager {
     if (!this.peerConnection) return;
     await this.peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
     const answer = await this.peerConnection.createAnswer();
+    // Mirror the bandwidth hint on the answer so both sides agree.
+    answer.sdp = setSdpVideoBandwidth(answer.sdp, SDP_BANDWIDTH_KBPS);
+    rlog(`[WebRTC]${this.tag} injected b=AS:${SDP_BANDWIDTH_KBPS} into answer SDP`);
     await this.peerConnection.setLocalDescription(answer);
     await this._waitForIceGatheringComplete();
     window.electronAPI.sendWebRTCSignal('webrtc:answer', { sdp: this._serializeSdp(this.peerConnection.localDescription) });
@@ -555,14 +623,14 @@ class WebRTCManager {
 
   async switchMonitor(newSourceId) {
     const q = this.quality;
-    console.log(`[WebRTC] Switching monitor to: ${newSourceId}`);
+    rlog(`[WebRTC]${this.tag} Switching monitor to: ${newSourceId}`);
     const newStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: newSourceId,
-          maxFrameRate: q.frameRate,
+          maxFrameRate: CAPTURE_FRAMERATE,
           maxWidth: q.width,
           maxHeight: q.height,
         },
