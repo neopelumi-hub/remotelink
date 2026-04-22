@@ -28,6 +28,30 @@ let controlActive = false;
 let lastMouseMoveTime = 0;
 const MOUSE_THROTTLE_MS = 33; // cap at ~30 events/sec to reduce input congestion on the relay
 
+// --- Performance diagnostics ---
+// Count how many input events are actually being sent, to verify throttling works.
+let _mouseMoveSentCount = 0;
+let _mouseMoveDroppedCount = 0;
+setInterval(() => {
+  if (_mouseMoveSentCount > 0 || _mouseMoveDroppedCount > 0) {
+    console.log(`[perf] mouse-move: ${_mouseMoveSentCount} sent/sec, ${_mouseMoveDroppedCount} throttled/sec`);
+  }
+  _mouseMoveSentCount = 0;
+  _mouseMoveDroppedCount = 0;
+}, 1000);
+
+// Main-thread heartbeat — if the interval drifts by more than ~100ms,
+// something is blocking the renderer's JS thread and starving the compositor.
+let _lastHeartbeat = performance.now();
+setInterval(() => {
+  const now = performance.now();
+  const drift = Math.round(now - _lastHeartbeat - 1000);
+  if (drift > 100) {
+    console.warn(`[perf] ⚠️ main-thread drift: ${drift}ms — something is blocking the renderer`);
+  }
+  _lastHeartbeat = now;
+}, 1000);
+
 // --- Connection mode state ---
 let connectionMode = 'session'; // 'session' or 'machine'
 let currentAccessRequest = null;
@@ -522,12 +546,16 @@ const remoteVideo = document.getElementById('remote-video');
 remoteVideo.addEventListener('mousemove', (e) => {
   if (!controlActive) return;
   const now = Date.now();
-  if (now - lastMouseMoveTime < MOUSE_THROTTLE_MS) return;
+  if (now - lastMouseMoveTime < MOUSE_THROTTLE_MS) {
+    _mouseMoveDroppedCount++;
+    return;
+  }
   lastMouseMoveTime = now;
 
   const coords = getScaledCoords(e);
   if (!coords.inBounds) return;
 
+  _mouseMoveSentCount++;
   window.electronAPI.sendInputCommand({
     type: 'mouse-move',
     x: coords.x,
