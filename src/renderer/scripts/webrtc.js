@@ -118,8 +118,14 @@ class WebRTCManager {
     };
 
     this.peerConnection.ontrack = (event) => {
-      rlog(`[WebRTC]${this.tag} ontrack fired, streams: ${event.streams.length}, track: ${event.track.kind}`);
-      if (!this.onRemoteStream) return;
+      if (!this._firstOntrackTime) this._firstOntrackTime = performance.now();
+      const t = event.track;
+      rlog(`[WebRTC]${this.tag} 🎯 ontrack fired: kind=${t.kind} id=${t.id} readyState=${t.readyState} muted=${t.muted} enabled=${t.enabled} streams=${event.streams.length}`);
+      rlog(`[WebRTC]${this.tag} receivers=${this.peerConnection.getReceivers().length} — viewer will now wait for RTP packets`);
+      if (!this.onRemoteStream) {
+        rwarn(`[WebRTC]${this.tag} ⚠️ ontrack fired but onRemoteStream callback is not set — stream will not be attached to <video>`);
+        return;
+      }
       if (event.streams && event.streams[0]) {
         this.onRemoteStream(event.streams[0]);
       } else {
@@ -377,49 +383,88 @@ class WebRTCManager {
     if (!this.peerConnection || this.peerConnection.connectionState !== 'connected') return;
     try {
       const stats = await this.peerConnection.getStats();
-      let outbound = null, remoteInbound = null, codec = null, candidatePair = null, localCand = null, remoteCand = null;
+      let outbound = null, inbound = null, remoteInbound = null;
+      let candidatePair = null, localCand = null, remoteCand = null;
+
       stats.forEach((r) => {
         if (r.type === 'outbound-rtp' && r.kind === 'video') outbound = r;
+        else if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
         else if (r.type === 'remote-inbound-rtp' && r.kind === 'video') remoteInbound = r;
         else if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) candidatePair = r;
       });
-      if (outbound?.codecId) {
-        stats.forEach((r) => { if (r.id === outbound.codecId) codec = r; });
-      }
+
       if (candidatePair) {
         stats.forEach((r) => {
           if (r.id === candidatePair.localCandidateId) localCand = r;
           if (r.id === candidatePair.remoteCandidateId) remoteCand = r;
         });
       }
+      const pairType = localCand && remoteCand ? `${localCand.candidateType}→${remoteCand.candidateType}` : '?';
+      const isRelay = localCand?.candidateType === 'relay' || remoteCand?.candidateType === 'relay';
+      const pathTag = `path=${pairType}${isRelay ? ' (TURN RELAY)' : ' (DIRECT)'}`;
 
-      if (!outbound) {
-        rlog(`[perf-stats]${this.tag} (no outbound-rtp yet)`);
+      // Pick the RTP direction that matters for this side.
+      // Host → sends video → has outbound-rtp
+      // Viewer → receives video → has inbound-rtp
+      const primary = outbound || inbound;
+
+      if (!primary) {
+        const videoSenders = this.peerConnection.getSenders().filter(s => s.track?.kind === 'video').length;
+        const videoReceivers = this.peerConnection.getReceivers().filter(r => r.track?.kind === 'video').length;
+        rwarn(`[perf-stats]${this.tag} ${pathTag} ⚠️ NO RTP ACTIVITY YET — videoSenders=${videoSenders} videoReceivers=${videoReceivers}. host expects senders≥1, viewer expects receivers≥1.`);
         return;
       }
 
+      let codec = null;
+      if (primary.codecId) {
+        stats.forEach((r) => { if (r.id === primary.codecId) codec = r; });
+      }
+
+      // Per-second rate using previous snapshot
       const prev = this._lastStatsSnapshot;
       let bitrateKbps = 0, fps = 0;
+      const bytesNow  = outbound ? primary.bytesSent      : primary.bytesReceived;
+      const framesNow = outbound ? primary.framesEncoded  : (primary.framesDecoded || 0);
       if (prev) {
-        const dt = (outbound.timestamp - prev.timestamp) / 1000;
+        const dt = (primary.timestamp - prev.timestamp) / 1000;
         if (dt > 0) {
-          bitrateKbps = Math.round(((outbound.bytesSent - prev.bytesSent) * 8) / dt / 1000);
-          fps = Math.round((outbound.framesEncoded - prev.framesEncoded) / dt);
+          bitrateKbps = Math.round(((bytesNow - prev.bytes) * 8) / dt / 1000);
+          fps = Math.round((framesNow - prev.frames) / dt);
         }
       }
-      this._lastStatsSnapshot = { timestamp: outbound.timestamp, bytesSent: outbound.bytesSent, framesEncoded: outbound.framesEncoded };
+      this._lastStatsSnapshot = { timestamp: primary.timestamp, bytes: bytesNow, frames: framesNow };
+
+      // One-shot first-packet milestone
+      if (!this._firstRtpLogged) {
+        const count = outbound ? primary.packetsSent : primary.packetsReceived;
+        if (count > 0) {
+          this._firstRtpLogged = true;
+          if (outbound) {
+            const ms = this._firstAddTrackTime ? Math.round(performance.now() - this._firstAddTrackTime) : null;
+            rlog(`[WebRTC]${this.tag} 🎬 FIRST RTP PACKET SENT — packetsSent=${count}${ms != null ? `, ${ms}ms after addTrack` : ''}`);
+          } else {
+            const ms = this._firstOntrackTime ? Math.round(performance.now() - this._firstOntrackTime) : null;
+            rlog(`[WebRTC]${this.tag} 🎬 FIRST RTP PACKET RECEIVED — packetsReceived=${count}${ms != null ? `, ${ms}ms after ontrack` : ''}`);
+          }
+        }
+      }
 
       const codecName = codec?.mimeType || '?';
-      const frameW = outbound.frameWidth || '?';
-      const frameH = outbound.frameHeight || '?';
-      const rtt = candidatePair?.currentRoundTripTime != null ? Math.round(candidatePair.currentRoundTripTime * 1000) : '?';
-      const loss = remoteInbound?.fractionLost != null ? (remoteInbound.fractionLost * 100).toFixed(1) : '?';
-      const pairType = localCand && remoteCand ? `${localCand.candidateType}→${remoteCand.candidateType}` : '?';
-      const isRelay = localCand?.candidateType === 'relay' || remoteCand?.candidateType === 'relay';
+      const frameW = primary.frameWidth || '?';
+      const frameH = primary.frameHeight || '?';
 
-      rlog(`[perf-stats]${this.tag} path=${pairType}${isRelay ? ' (TURN RELAY)' : ' (DIRECT)'} codec=${codecName} size=${frameW}x${frameH} bitrate=${bitrateKbps}kbps fps=${fps} rtt=${rtt}ms loss=${loss}%  encoded=${outbound.framesEncoded} sent=${outbound.framesSent} dropped(qualityLimit=${outbound.qualityLimitationReason || 'none'})`);
-      if (outbound.qualityLimitationReason && outbound.qualityLimitationReason !== 'none') {
-        rwarn(`[perf-stats]${this.tag} ⚠️ encoder is quality-limited by: ${outbound.qualityLimitationReason} (cpu = encoder can't keep up, bandwidth = network, other = something else)`);
+      if (outbound) {
+        const rtt = candidatePair?.currentRoundTripTime != null ? Math.round(candidatePair.currentRoundTripTime * 1000) : '?';
+        const loss = remoteInbound?.fractionLost != null ? (remoteInbound.fractionLost * 100).toFixed(1) : '?';
+        rlog(`[perf-stats]${this.tag} ${pathTag} codec=${codecName} size=${frameW}x${frameH} OUT: bitrate=${bitrateKbps}kbps fps=${fps} rtt=${rtt}ms loss=${loss}% packetsSent=${primary.packetsSent} framesEncoded=${primary.framesEncoded} framesSent=${primary.framesSent} qualityLimit=${primary.qualityLimitationReason || 'none'}`);
+        if (primary.qualityLimitationReason && primary.qualityLimitationReason !== 'none') {
+          rwarn(`[perf-stats]${this.tag} ⚠️ encoder limited by: ${primary.qualityLimitationReason}`);
+        }
+      } else {
+        const jitterMs = primary.jitter != null ? Math.round(primary.jitter * 1000) : '?';
+        const framesDropped = primary.framesDropped || 0;
+        const nacks = primary.nackCount || 0;
+        rlog(`[perf-stats]${this.tag} ${pathTag} codec=${codecName} size=${frameW}x${frameH} IN: bitrate=${bitrateKbps}kbps fps=${fps} jitter=${jitterMs}ms packetsReceived=${primary.packetsReceived} packetsLost=${primary.packetsLost} framesDecoded=${primary.framesDecoded || 0} framesDropped=${framesDropped} nacks=${nacks}`);
       }
     } catch (err) {
       rwarn(`[perf-stats]${this.tag} getStats failed: ${err.message}`);
@@ -427,26 +472,44 @@ class WebRTCManager {
   }
 
   async createAndSendOffer(monitorInfo) {
-    if (!this.peerConnection || !this.localStream) {
-      console.error('[WebRTC] Cannot create offer: missing peerConnection or localStream');
+    if (!this.peerConnection) {
+      rerror(`[WebRTC]${this.tag} Cannot create offer: no peerConnection`);
+      return;
+    }
+    if (!this.localStream) {
+      rerror(`[WebRTC]${this.tag} ❌ Cannot create offer: no localStream — did startScreenCapture() succeed?`);
       return;
     }
 
-    this.localStream.getTracks().forEach((track) => {
-      console.log('[WebRTC] Adding track to peer connection:', track.kind, track.label);
-      this.peerConnection.addTrack(track, this.localStream);
+    const tracks = this.localStream.getTracks();
+    rlog(`[WebRTC]${this.tag} localStream has ${tracks.length} track(s) to add BEFORE createOffer`);
+    if (tracks.length === 0) {
+      rerror(`[WebRTC]${this.tag} ❌ localStream has 0 tracks — capture returned an empty stream, nothing to send`);
+    }
+    tracks.forEach((track) => {
+      rlog(`[WebRTC]${this.tag} → addTrack: kind=${track.kind} id=${track.id} label="${track.label.substring(0, 60)}" readyState=${track.readyState} muted=${track.muted} enabled=${track.enabled}`);
+      const sender = this.peerConnection.addTrack(track, this.localStream);
+      rlog(`[WebRTC]${this.tag}   ✅ addTrack returned sender.track.id=${sender?.track?.id || 'null'}`);
     });
+    this._firstAddTrackTime = performance.now();
+
+    const senders = this.peerConnection.getSenders();
+    const transceivers = this.peerConnection.getTransceivers();
+    rlog(`[WebRTC]${this.tag} after addTrack: senders=${senders.length}, transceivers=${transceivers.length} (should be ≥1 each for video to flow)`);
 
     this._applyCodecPreferences();
 
+    // createOffer runs AFTER addTrack — this ordering is required so the
+    // generated SDP contains the m=video line for our screen track.
+    rlog(`[WebRTC]${this.tag} calling createOffer (AFTER addTrack)`);
     const offer = await this.peerConnection.createOffer();
+    rlog(`[WebRTC]${this.tag} createOffer returned sdp length=${offer.sdp.length}, contains m=video=${offer.sdp.includes('m=video')}`);
     await this.peerConnection.setLocalDescription(offer);
 
     await this._applyEncoderParams();
 
-    // Wait for STUN/TURN candidate gathering to finish so the offer SDP
-    // ships with a complete candidate list instead of trickling them in
-    // afterwards. Dramatically shortens time-to-first-frame.
+    // Wait for STUN/TURN candidate gathering so the offer carries a full
+    // candidate list; shortens time-to-first-frame.
     await this._waitForIceGatheringComplete();
 
     const sdpPlain = this._serializeSdp(this.peerConnection.localDescription);
