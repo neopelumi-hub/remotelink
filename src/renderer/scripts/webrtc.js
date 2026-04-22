@@ -3,6 +3,17 @@
 // Handles peer connections, screen capture, and media streaming
 // =============================================
 
+const QUALITY_PRESETS = {
+  low:    { width: 1280, height: 720,  frameRate: 10, maxBitrateKbps:  800 },
+  medium: { width: 1920, height: 1080, frameRate: 15, maxBitrateKbps: 2000 },
+  high:   { width: 1920, height: 1080, frameRate: 30, maxBitrateKbps: 3000 },
+};
+
+// Preferred codec order for screen sharing. VP9 compresses screen content
+// much better than VP8/H264 at the same bitrate; VP8 is the universal
+// fallback if the peer doesn't negotiate VP9.
+const PREFERRED_VIDEO_CODECS = ['video/VP9', 'video/VP8'];
+
 class WebRTCManager {
   constructor() {
     this.peerConnection = null;
@@ -10,6 +21,12 @@ class WebRTCManager {
     this.pendingCandidates = [];
     this.onRemoteStream = null;
     this.onConnectionStateChange = null;
+    this.quality = QUALITY_PRESETS.medium;
+  }
+
+  setQuality(preset) {
+    this.quality = QUALITY_PRESETS[preset] || QUALITY_PRESETS.medium;
+    console.log(`[WebRTC] Quality set to ${preset}: ${this.quality.width}x${this.quality.height} @ ${this.quality.frameRate}fps, cap ${this.quality.maxBitrateKbps}kbps`);
   }
 
   // Serialize RTCSessionDescription to a plain object that survives
@@ -88,14 +105,17 @@ class WebRTCManager {
   }
 
   async startScreenCapture(sourceId) {
-    console.log('[WebRTC] Starting screen capture for source:', sourceId);
+    const q = this.quality;
+    console.log(`[WebRTC] Starting screen capture for source: ${sourceId} (${q.width}x${q.height}@${q.frameRate}fps)`);
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: sourceId,
-          maxFrameRate: 30,
+          maxFrameRate: q.frameRate,
+          maxWidth: q.width,
+          maxHeight: q.height,
         },
       },
     });
@@ -103,6 +123,57 @@ class WebRTCManager {
     console.log('[WebRTC] Screen capture started, tracks:', stream.getTracks().length);
     this.localStream = stream;
     return stream;
+  }
+
+  // Prefer VP9 then VP8 on the video transceiver before the offer is created,
+  // so screen content gets a codec tuned for it rather than whatever the peer
+  // listed first in its default order.
+  _applyCodecPreferences() {
+    try {
+      if (!RTCRtpSender.getCapabilities) return;
+      const caps = RTCRtpSender.getCapabilities('video');
+      if (!caps || !caps.codecs) return;
+
+      const preferred = [];
+      for (const name of PREFERRED_VIDEO_CODECS) {
+        for (const c of caps.codecs) {
+          if (c.mimeType.toLowerCase() === name.toLowerCase()) preferred.push(c);
+        }
+      }
+      // Append remaining codecs so negotiation doesn't fail if peer lacks VP9/VP8
+      for (const c of caps.codecs) {
+        if (!preferred.includes(c)) preferred.push(c);
+      }
+
+      for (const transceiver of this.peerConnection.getTransceivers()) {
+        if (transceiver.sender?.track?.kind === 'video' && transceiver.setCodecPreferences) {
+          transceiver.setCodecPreferences(preferred);
+          console.log('[WebRTC] Codec preference applied:', preferred.slice(0, 3).map(c => c.mimeType).join(' > '));
+        }
+      }
+    } catch (err) {
+      console.warn('[WebRTC] setCodecPreferences failed:', err.message);
+    }
+  }
+
+  // Cap the outbound video bitrate so the encoder doesn't flood the uplink.
+  async _applyBitrateLimit() {
+    if (!this.peerConnection) return;
+    const kbps = this.quality.maxBitrateKbps;
+    for (const sender of this.peerConnection.getSenders()) {
+      if (sender.track?.kind !== 'video') continue;
+      try {
+        const params = sender.getParameters();
+        params.encodings = params.encodings && params.encodings.length ? params.encodings : [{}];
+        params.encodings[0].maxBitrate = kbps * 1000;
+        // Screen content: prioritize detail over motion smoothness
+        params.degradationPreference = 'maintain-resolution';
+        await sender.setParameters(params);
+        console.log(`[WebRTC] Bitrate cap applied: ${kbps} kbps`);
+      } catch (err) {
+        console.warn('[WebRTC] setParameters failed:', err.message);
+      }
+    }
   }
 
   async createAndSendOffer(monitorInfo) {
@@ -117,8 +188,13 @@ class WebRTCManager {
       this.peerConnection.addTrack(track, this.localStream);
     });
 
+    this._applyCodecPreferences();
+
     const offer = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offer);
+
+    // setParameters requires the transceiver to be stable; apply after SLD.
+    await this._applyBitrateLimit();
 
     const sdpPlain = this._serializeSdp(this.peerConnection.localDescription);
     console.log('[WebRTC] Sending offer, SDP type:', sdpPlain.type, 'length:', sdpPlain.sdp.length);
@@ -191,14 +267,17 @@ class WebRTCManager {
   }
 
   async switchMonitor(newSourceId) {
-    console.log('[WebRTC] Switching monitor to:', newSourceId);
+    const q = this.quality;
+    console.log(`[WebRTC] Switching monitor to: ${newSourceId} (${q.width}x${q.height}@${q.frameRate}fps)`);
     const newStream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         mandatory: {
           chromeMediaSource: 'desktop',
           chromeMediaSourceId: newSourceId,
-          maxFrameRate: 30,
+          maxFrameRate: q.frameRate,
+          maxWidth: q.width,
+          maxHeight: q.height,
         },
       },
     });
@@ -217,6 +296,8 @@ class WebRTCManager {
     }
 
     this.localStream = newStream;
+    // Re-apply bitrate limit — replaceTrack can reset encoder params
+    await this._applyBitrateLimit();
   }
 
   destroy() {
@@ -238,3 +319,4 @@ class WebRTCManager {
 }
 
 window.WebRTCManager = WebRTCManager;
+window.QUALITY_PRESETS = QUALITY_PRESETS;

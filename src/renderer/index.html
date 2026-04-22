@@ -281,6 +281,22 @@
           </div>
 
           <div class="settings-section">
+            <h3 class="settings-section-title">Streaming Quality</h3>
+            <p class="settings-desc">Trade off image quality against latency. Change takes effect on the next hosted session.</p>
+            <div class="settings-field">
+              <div class="settings-toggle-info">
+                <label class="settings-field-label">Quality preset</label>
+                <span class="settings-field-hint" id="quality-hint">720p · 10 fps · 800 kbps (Low) &nbsp;·&nbsp; 1080p · 15 fps · 2 Mbps (Medium) &nbsp;·&nbsp; 1080p · 30 fps · 3 Mbps (High)</span>
+              </div>
+              <select class="settings-select" id="stream-quality-select">
+                <option value="low">Low — 720p / 10 fps</option>
+                <option value="medium" selected>Medium — 1080p / 15 fps</option>
+                <option value="high">High — 1080p / 30 fps</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="settings-section">
             <h3 class="settings-section-title">Startup & Tray</h3>
             <p class="settings-desc">Configure how RemoteLink starts and behaves in the background.</p>
             <div class="settings-field">

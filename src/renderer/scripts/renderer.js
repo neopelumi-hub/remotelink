@@ -26,7 +26,7 @@ let chatAudioCtx = null;
 // --- Remote control state ---
 let controlActive = false;
 let lastMouseMoveTime = 0;
-const MOUSE_THROTTLE_MS = 16; // ~60fps cap
+const MOUSE_THROTTLE_MS = 33; // cap at ~30 events/sec to reduce input congestion on the relay
 
 // --- Connection mode state ---
 let connectionMode = 'session'; // 'session' or 'machine'
@@ -697,6 +697,8 @@ async function renderSettingsPage() {
     document.getElementById('toggle-start-windows').checked = settings.startWithWindows;
     document.getElementById('toggle-start-minimized').checked = settings.startMinimized;
     document.getElementById('toggle-show-notifications').checked = settings.showNotifications;
+    const qualitySelect = document.getElementById('stream-quality-select');
+    if (qualitySelect) qualitySelect.value = settings.streamQuality || 'medium';
 
     const result = await window.electronAPI.getTrustedMachines();
     const trusted = result.trusted || {};
@@ -758,6 +760,14 @@ async function initHostWebRTC() {
     }
 
     webrtcManager = new WebRTCManager();
+    // Apply the current stream quality setting before starting capture so
+    // resolution / frame-rate constraints are set correctly on the stream.
+    try {
+      const settings = await window.electronAPI.getSettings();
+      webrtcManager.setQuality(settings?.streamQuality || 'medium');
+    } catch (e) {
+      webrtcManager.setQuality('medium');
+    }
     webrtcManager.createPeerConnection();
 
     webrtcManager.onConnectionStateChange = (state) => {
@@ -1712,6 +1722,13 @@ document.getElementById('toggle-start-minimized').addEventListener('change', (e)
 document.getElementById('toggle-show-notifications').addEventListener('change', (e) => {
   window.electronAPI.updateSetting('showNotifications', e.target.checked);
 });
+
+const qualitySelectEl = document.getElementById('stream-quality-select');
+if (qualitySelectEl) {
+  qualitySelectEl.addEventListener('change', (e) => {
+    window.electronAPI.updateSetting('streamQuality', e.target.value);
+  });
+}
 
 // =============================================
 // Console Dashboard

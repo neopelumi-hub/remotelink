@@ -171,6 +171,7 @@ const DEFAULT_SETTINGS = {
   startWithWindows: true,
   startMinimized: true,
   showNotifications: true,
+  streamQuality: 'medium',
 };
 
 function getSettings(userDataPath) {
